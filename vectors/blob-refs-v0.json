@@ -1,0 +1,160 @@
+{
+  "cases": [
+    {
+      "expect": {
+        "hex": "16c930136a469d293bffaa6e8c5e09f9a59224410ad26701a20bb24962b1fbef"
+      },
+      "in": {
+        "bytes": "0102",
+        "mediaType": "image/png"
+      },
+      "name": "digest-png",
+      "op": "digest"
+    },
+    {
+      "expect": {
+        "hex": "680616437465b1d6bbacb37e0a4e81d0e69532a6c441b2d8cf19991175d3704b"
+      },
+      "in": {
+        "bytes": "0102",
+        "mediaType": "text/plain"
+      },
+      "name": "digest-same-body-other-type-is-not-the-same-content",
+      "op": "digest"
+    },
+    {
+      "expect": {
+        "hex": "16c930136a469d293bffaa6e8c5e09f9a59224410ad26701a20bb24962b1fbef"
+      },
+      "in": {
+        "bytes": "0102",
+        "mediaType": "image/png"
+      },
+      "name": "digest-determinism-pin",
+      "op": "digest"
+    },
+    {
+      "expect": {
+        "reject": "bad-ref"
+      },
+      "in": {
+        "bytes": "0102",
+        "mediaType": ""
+      },
+      "name": "digest-reject-empty-type",
+      "op": "digest"
+    },
+    {
+      "expect": {
+        "hex": "d903eaa36473697a650266646967657374784031366339333031333661343639643239336266666161366538633565303966396135393232343431306164323637303161323062623234393632623166626566696d656469615479706569696d6167652f706e67"
+      },
+      "in": {
+        "model": {
+          "digest": "16c930136a469d293bffaa6e8c5e09f9a59224410ad26701a20bb24962b1fbef",
+          "mediaType": "image/png",
+          "size": 2,
+          "type": "ref"
+        }
+      },
+      "name": "enc-ref-roundtrip",
+      "op": "roundtrip"
+    },
+    {
+      "expect": {
+        "reject": "bad-ref"
+      },
+      "in": {
+        "model": {
+          "digest": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+          "mediaType": "image/png",
+          "size": 2,
+          "type": "ref"
+        }
+      },
+      "name": "enc-ref-reject-nonhex-digest",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "reject": "bad-ref"
+      },
+      "in": {
+        "model": {
+          "digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "mediaType": "image/png",
+          "size": 2,
+          "type": "ref"
+        }
+      },
+      "name": "enc-ref-reject-uppercase-digest",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "reject": "bad-ref"
+      },
+      "in": {
+        "model": {
+          "digest": "16c930136a469d293bffaa6e8c5e09f9a59224410ad26701a20bb24962b1fbef",
+          "mediaType": "",
+          "size": 2,
+          "type": "ref"
+        }
+      },
+      "name": "enc-ref-reject-empty-type",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "d903eaa36473697a650266646967657374784031366339333031333661343639643239336266666161366538633565303966396135393232343431306164323637303161323062623234393632623166626566696d656469615479706569696d6167652f706e67"
+      },
+      "in": {
+        "hex": "d903eaa36473697a650266646967657374784031366339333031333661343639643239336266666161366538633565303966396135393232343431306164323637303161323062623234393632623166626566696d656469615479706569696d6167652f706e67"
+      },
+      "name": "dec-ref-canonical",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "bad-ref"
+      },
+      "in": {
+        "hex": "d903ea6161"
+      },
+      "name": "rej-dec-tag-of-text",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "bad-ref"
+      },
+      "in": {
+        "hex": "d903eaa0"
+      },
+      "name": "rej-dec-tag-of-empty-map",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "bad-ref"
+      },
+      "in": {
+        "hex": "d903eaa2616101616202"
+      },
+      "name": "rej-dec-tag-of-2key-map",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "bad-ref"
+      },
+      "in": {
+        "hex": "d903eaa36473697a650266646967657374784041414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141696d656469615479706569696d6167652f706e67"
+      },
+      "name": "rej-dec-forged-uppercase-digest",
+      "op": "decode"
+    }
+  ],
+  "note": "Blob references: tag 1002, hash-bound mediaType (round 12). digest = SHA-256(canonical CBOR of {bytes, type}); content identity includes type — same body under another type is another blob. Generated; edit via the patcher, not by hand.",
+  "profile": "mwydyn-cbor-v0.1-blob-refs"
+}

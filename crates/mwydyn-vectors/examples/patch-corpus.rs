@@ -103,4 +103,83 @@ fn main() {
     }
     std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap()).unwrap();
     println!("patched {}", path.display());
+
+    write_blob_corpus();
+}
+
+/// Generates vectors/blob-refs-v0.json wholesale — machine-built
+/// wants per work-note 11's rule (hand-write rejections only).
+fn write_blob_corpus() {
+    use mwydyn_data::Value;
+
+    let hexs = |v: &Value| encode(v).iter().map(|b| format!("{:02x}", b)).collect::<String>();
+
+    let png_digest = Value::blob_digest(b"\x01\x02", "image/png").unwrap();
+    let txt_digest = Value::blob_digest(b"\x01\x02", "text/plain").unwrap();
+    let rf = Value::blob_ref(b"\x01\x02", "image/png").unwrap();
+    let ref_hex = hexs(&rf);
+    let forged = Value::BlobRef {
+        digest: "A".repeat(64),
+        media_type: "image/png".into(),
+        size: 2,
+    };
+
+    let c = |name: &str, op: &str, mut inp: serde_json::Value, expect: serde_json::Value| {
+        inp["__placeholder"] = serde_json::Value::Null;
+        inp.as_object_mut().unwrap().remove("__placeholder");
+        serde_json::json!({ "name": name, "op": op, "in": inp, "expect": expect })
+    };
+
+    let cases = vec![
+        c("digest-png", "digest",
+            serde_json::json!({ "bytes": "0102", "mediaType": "image/png" }),
+            serde_json::json!({ "hex": png_digest })),
+        c("digest-same-body-other-type-is-not-the-same-content", "digest",
+            serde_json::json!({ "bytes": "0102", "mediaType": "text/plain" }),
+            serde_json::json!({ "hex": txt_digest })),
+        c("digest-determinism-pin", "digest",
+            serde_json::json!({ "bytes": "0102", "mediaType": "image/png" }),
+            serde_json::json!({ "hex": png_digest })),
+        c("digest-reject-empty-type", "digest",
+            serde_json::json!({ "bytes": "0102", "mediaType": "" }),
+            serde_json::json!({ "reject": "bad-ref" })),
+        c("enc-ref-roundtrip", "roundtrip",
+            serde_json::json!({ "model": { "type": "ref", "digest": png_digest, "mediaType": "image/png", "size": 2 } }),
+            serde_json::json!({ "hex": ref_hex })),
+        c("enc-ref-reject-nonhex-digest", "encode",
+            serde_json::json!({ "model": { "type": "ref", "digest": "z".repeat(64), "mediaType": "image/png", "size": 2 } }),
+            serde_json::json!({ "reject": "bad-ref" })),
+        c("enc-ref-reject-uppercase-digest", "encode",
+            serde_json::json!({ "model": { "type": "ref", "digest": "A".repeat(64), "mediaType": "image/png", "size": 2 } }),
+            serde_json::json!({ "reject": "bad-ref" })),
+        c("enc-ref-reject-empty-type", "encode",
+            serde_json::json!({ "model": { "type": "ref", "digest": png_digest, "mediaType": "", "size": 2 } }),
+            serde_json::json!({ "reject": "bad-ref" })),
+        c("dec-ref-canonical", "decode",
+            serde_json::json!({ "hex": ref_hex }),
+            serde_json::json!({ "hex": ref_hex })),
+        c("rej-dec-tag-of-text", "decode",
+            serde_json::json!({ "hex": "d903ea6161" }),
+            serde_json::json!({ "reject": "bad-ref" })),
+        c("rej-dec-tag-of-empty-map", "decode",
+            serde_json::json!({ "hex": "d903eaa0" }),
+            serde_json::json!({ "reject": "bad-ref" })),
+        c("rej-dec-tag-of-2key-map", "decode",
+            serde_json::json!({ "hex": format!("d903ea{}", hexs(&Value::map(vec![
+                ("a".into(), Value::Int(1)), ("b".into(), Value::Int(2))]).unwrap())) }),
+            serde_json::json!({ "reject": "bad-ref" })),
+        c("rej-dec-forged-uppercase-digest", "decode",
+            serde_json::json!({ "hex": hexs(&forged) }),
+            serde_json::json!({ "reject": "bad-ref" })),
+    ];
+
+    let corpus = serde_json::json!({
+        "profile": "mwydyn-cbor-v0.1-blob-refs",
+        "note": "Blob references: tag 1002, hash-bound mediaType (round 12). digest = SHA-256(canonical CBOR of {bytes, type}); content identity includes type — same body under another type is another blob. Generated; edit via the patcher, not by hand.",
+        "cases": cases,
+    });
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../vectors/blob-refs-v0.json");
+    std::fs::write(&out, serde_json::to_string_pretty(&corpus).unwrap()).unwrap();
+    println!("wrote {}", out.display());
 }

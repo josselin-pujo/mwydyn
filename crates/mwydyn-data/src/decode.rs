@@ -182,6 +182,44 @@ fn read_value(
                     _ => Err(DecodeError::Malformed("timestamp payload not an int")),
                 }
             }
+            1002 => {
+                // BlobRef: {size, digest, mediaType} in canonical order.
+                // Shape is a data-model fact (profile v0.1, round 12);
+                // hash verification is a verification-point concern.
+                let inner = read_value(r, opts, depth + 1)?;
+                let Value::Map(pairs) = inner else {
+                    return Err(DecodeError::BadBlobRef);
+                };
+                if pairs.len() != 3
+                    || pairs[0].0 != "size"
+                    || pairs[1].0 != "digest"
+                    || pairs[2].0 != "mediaType"
+                {
+                    return Err(DecodeError::BadBlobRef);
+                }
+                let size = match &pairs[0].1 {
+                    Value::Int(n) if *n >= 0 => *n as u64,
+                    Value::BigPos(m) if m.len() <= 8 => {
+                        let mut buf = [0u8; 8];
+                        buf[8 - m.len()..].copy_from_slice(m);
+                        u64::from_be_bytes(buf)
+                    }
+                    _ => return Err(DecodeError::BadBlobRef),
+                };
+                let Value::Text(digest) = &pairs[1].1 else {
+                    return Err(DecodeError::BadBlobRef);
+                };
+                let Value::Text(media_type) = &pairs[2].1 else {
+                    return Err(DecodeError::BadBlobRef);
+                };
+                Value::validate_blob_ref(digest, media_type)
+                    .map_err(|_| DecodeError::BadBlobRef)?;
+                Ok(Value::BlobRef {
+                    digest: digest.clone(),
+                    media_type: media_type.clone(),
+                    size,
+                })
+            }
             other => Err(DecodeError::UnknownTag(other)),
         },
         7 => match ai {

@@ -59,6 +59,7 @@ pub enum ValueError {
     DuplicateKey(String),
     BadKeyHygiene(String),
     BadBignum(&'static str),
+    BadBlobRef(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +75,7 @@ pub enum DecodeError {
     DuplicateKey(String),
     BadKeyHygiene,
     BadBignum,
+    BadBlobRef,
 }
 
 pub struct DecodeOptions {
@@ -111,6 +113,17 @@ pub enum Value {
     /// Tag 1001 — integer microseconds since the Unix epoch, UTC
     /// (int64 range).
     Timestamp(i64),
+    /// Tag 1002 — a content-addressed blob reference. The media type
+    /// is HASH-BOUND: `digest = SHA-256(canonical CBOR of
+    /// {bytes, type})` — content identity includes type (owner's
+    /// law, round 12). Same body under two types is two blobs, never
+    /// deduped; cross-type coexistence would be a collision, not a
+    /// desired state.
+    BlobRef {
+        digest: String,
+        media_type: String,
+        size: u64,
+    },
     Array(Vec<Value>),
     /// String-keyed; sorted by `(byte-length, bytes)`; duplicates
     /// rejected; keys hygiene-checked at construction.
@@ -124,6 +137,41 @@ impl Value {
         } else {
             Err(ValueError::NonFiniteFloat)
         }
+    }
+
+    /// The hash-bound blob digest: SHA-256 over the canonical CBOR
+    /// encoding of `{ bytes, type }` (round 12). Pure in its inputs —
+    /// no magic-byte detection anywhere in this path.
+    pub fn blob_digest(bytes: &[u8], media_type: &str) -> Result<String, ValueError> {
+        validate_media_type(media_type)?;
+        let pair = Value::map(vec![
+            ("type".into(), Value::Text(media_type.to_string())),
+            ("bytes".into(), Value::Bytes(bytes.to_vec())),
+        ])?;
+        Ok(sha256_hex(&crate::encode::encode(&pair)))
+    }
+
+    /// Build a blob ref: digest computed from (bytes, media_type),
+    /// size from the bytes. The ref's type is verified by the hash,
+    /// not decorative — re-typing in transit is detectable at any
+    /// verification point.
+    pub fn blob_ref(bytes: &[u8], media_type: &str) -> Result<Value, ValueError> {
+        let digest = Value::blob_digest(bytes, media_type)?;
+        Ok(Value::BlobRef {
+            digest,
+            media_type: media_type.to_string(),
+            size: bytes.len() as u64,
+        })
+    }
+
+    /// Validate an externally supplied ref's fields (shape only —
+    /// verifying the hash against content is a verification-point
+    /// concern: the store on get, consumers before dispatch).
+    pub fn validate_blob_ref(digest: &str, media_type: &str) -> Result<(), ValueError> {
+        if digest.len() != 64 || !digest.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
+            return Err(ValueError::BadBlobRef("digest is not 64-char lowercase hex"));
+        }
+        validate_media_type(media_type)
     }
 
     pub fn big_pos(magnitude_be: Vec<u8>) -> Result<Value, ValueError> {
@@ -167,4 +215,21 @@ fn check_minimal(magnitude_be: &[u8]) -> Result<(), ValueError> {
         return Err(ValueError::BadBignum("non-minimal magnitude"));
     }
     Ok(())
+}
+
+fn validate_media_type(media_type: &str) -> Result<(), ValueError> {
+    if media_type.is_empty() {
+        return Err(ValueError::BadBlobRef("empty media type"));
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(bytes);
+    h.finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }

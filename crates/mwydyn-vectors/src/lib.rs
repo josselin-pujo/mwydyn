@@ -33,6 +33,7 @@ pub enum Op {
     Encode,
     Decode,
     Roundtrip,
+    Digest,
 }
 
 #[derive(Deserialize, Default)]
@@ -43,6 +44,10 @@ pub struct Input {
     pub model: Option<Model>,
     #[serde(default)]
     pub hex: Option<String>,
+    #[serde(default)]
+    pub bytes: Option<String>,
+    #[serde(rename = "mediaType", default)]
+    pub media_type: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -65,6 +70,13 @@ pub enum Model {
     Timestamp { micros: i64 },
     Big { sign: String, hex: String },
     Float { value: f64 },
+    #[serde(rename = "ref")]
+    BlobRef {
+        digest: String,
+        #[serde(rename = "mediaType")]
+        media_type: String,
+        size: u64,
+    },
 }
 
 fn unhex(s: &str) -> Result<Vec<u8>, String> {
@@ -130,6 +142,20 @@ pub fn model_to_value(m: &Model) -> Result<Value, String> {
             }
         }
         Model::Float { value } => Value::float(*value).map_err(|e| format!("{:?}", e))?,
+        Model::BlobRef {
+            digest,
+            media_type,
+            size,
+        } => {
+            // model-supplied refs are validated, never trusted
+            Value::validate_blob_ref(digest, media_type)
+                .map_err(|e| format!("{:?}", e))?;
+            Value::BlobRef {
+                digest: digest.clone(),
+                media_type: media_type.clone(),
+                size: *size,
+            }
+        }
     })
 }
 
@@ -180,6 +206,7 @@ fn decode_error_code(e: &DecodeError) -> &'static str {
         DecodeError::DuplicateKey(_) => "duplicate-key",
         DecodeError::BadKeyHygiene => "bad-key",
         DecodeError::BadBignum => "bad-bignum",
+        DecodeError::BadBlobRef => "bad-ref",
     }
 }
 
@@ -278,6 +305,34 @@ pub fn check_corpus(cases: &[Case]) -> Vec<String> {
                     if let Some(h) = &case.expect.hex {
                         if hex(&bytes) != *h {
                             return Err(format!("hex mismatch: got {}, want {}", hex(&bytes), h));
+                        }
+                    }
+                }
+                Op::Digest => {
+                    let bytes = unhex(case.input.bytes.as_deref().ok_or("digest needs bytes")?)?;
+                    let mt = case
+                        .input
+                        .media_type
+                        .as_deref()
+                        .ok_or("digest needs mediaType")?;
+                    match mwydyn_data::Value::blob_digest(&bytes, mt) {
+                        Err(e) => match &case.expect.reject {
+                            Some(code) if code == "bad-ref" => {}
+                            Some(other) => {
+                                return Err(format!("rejected {:?}, want {}", e, other))
+                            }
+                            None => return Err(format!("unexpectedly rejected: {:?}", e)),
+                        },
+                        Ok(d) => {
+                            if case.expect.reject.is_some() {
+                                return Err("expected reject, computed ok".into());
+                            }
+                            match &case.expect.hex {
+                                Some(h) if d != *h => {
+                                    return Err(format!("digest mismatch: got {}, want {}", d, h))
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }

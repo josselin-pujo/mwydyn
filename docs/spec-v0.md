@@ -23,7 +23,8 @@
   non-integral numbers, no NaN/Inf/undefined, string-key-only maps
   sorted length-first-then-bytewise, no indefinite lengths, unknown
   tags rejected, depth/count/length limits, key hygiene. Extensions
-  require a profile version bump.
+  require a profile version bump (v0.1, round 12: tag 1002 — blob
+  references).
 - **Messages are data, not blob containers. Hard cap: 1 MiB per
   message.** Reality should sit far below; the cap exists to force the
   by-reference discipline.
@@ -247,16 +248,35 @@ ceremony without payoff.
   synchronous host functions, hardcoded Rust, collocated in every
   runtime. (Range/len exist so consumers stream without materializing
   — docgen's PDFs.)
-- The **blob reference is a first-class CBOR extension type**
-  (tagged), shape `{ digest, mediaType, bytes }` [A1:05 §2] — blobness
-  lives in the data model, not in envelopes. Routing and telemetry
-  never see blob bytes, trivially.
+- The **blob reference is a first-class CBOR type: tag 1002**
+  [DECIDED, round 12; profile v0 → v0.1] wrapping
+  `{ digest, mediaType, size }` — digest = 64-char lowercase hex
+  SHA-256, size = u64. Ref-ness is a data-model fact enforced at the
+  barrier decode, not a convention. Routing and telemetry never see
+  blob bytes, trivially.
+- **The mediaType is hash-bound, not decorative [DECIDED, round 12]**.
+  Owner's law: **content identity includes type** — same body under
+  another type is *not* the same content, and cross-type coexistence
+  would be a collision, not a desired state. `put(bytes, mediaType)`
+  is a pure function of **(bytes, mediaType)** — digest = SHA-256
+  over the canonical CBOR encoding of `{ bytes, type }`. The declared
+  type is an *input*: no magic-byte detection inside `put`; purity
+  and replay-safety unchanged (a deterministic replay re-puts to the
+  identical digest). Consequences, ratified: no cross-type dedup; the
+  type is frozen at put; **a ref re-typed in transit is detectable**
+  at any verification point (the store on `get`; consumers before
+  dispatch), because (type, bytes) no longer hashes to the digest.
+  Sniff-validation of declared-vs-actual is an optional embedding
+  face, never a purity dependency. The underlying observation is a
+  law of its own: **anything claimed outside the hash is
+  mutable-by-transit.**
 - **Blob bytes never transit messages.** The 1 MiB cap (§1) and the
   by-reference layering law [A1:51] stay; writes happen before any
   reference can exist.
 - **Replay-safe without journaling puts**: content addressing makes
-  `put` a pure function of bytes — a deterministic replay re-puts to
-  the identical digest. The rules that buy this: writes are
+  `put` a pure function of its inputs — bytes and declared media
+  type (§4, round 12) — so a deterministic replay re-puts to the
+  identical digest. The rules that buy this: writes are
   idempotent-by-content; **GC is reference-aware** (a digest cited by
   any reachable log position, actor state, or snapshot is collectable
   only above the live watermark); a missing blob is a loud integrity

@@ -46,6 +46,23 @@ fn write_value(out: &mut Vec<u8>, v: &Value) {
             write_head(out, 6, 1001);
             write_int(out, *micros);
         }
+        Value::BlobRef { digest, media_type, size } => {
+            // A serializer, not a validator: forged refs must be
+            // encodable so that rejection vectors can exist.
+            write_head(out, 6, 1002);
+            // canonical key order: "size"(4) < "digest"(6) < "mediaType"(9)
+            let size_v = if *size <= i64::MAX as u64 {
+                Value::Int(*size as i64)
+            } else {
+                Value::BigPos(size.to_be_bytes().to_vec())
+            };
+            let inner = Value::map_unchecked(vec![
+                ("size".into(), size_v),
+                ("digest".into(), Value::Text(digest.clone())),
+                ("mediaType".into(), Value::Text(media_type.clone())),
+            ]);
+            write_value(out, &inner);
+        }
         Value::Array(items) => {
             write_head(out, 4, items.len() as u64);
             for item in items {

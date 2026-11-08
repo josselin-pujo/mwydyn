@@ -37,7 +37,9 @@ interface types {
   }
 
   /// Content-addressed reference; first-class CBOR type on the wire
-  /// (§4). `{ digest, media-type, size }`.
+  /// (tag 1002, §4). `{ digest, media-type, size }`. The media type
+  /// is HASH-BOUND: digest = SHA-256(canonical CBOR of {bytes, type})
+  /// — content identity includes type (round 12).
   record blob-ref {
     digest: string,
     media-type: string,
