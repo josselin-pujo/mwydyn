@@ -5,6 +5,7 @@ members = [
     "crates/mwydyn-schema",
     "crates/mwydyn-core",
     "crates/mwydyn-vectors",
+    "crates/mwydyn-wasm",
 ]
 
 [workspace.package]
