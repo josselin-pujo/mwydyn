@@ -149,6 +149,16 @@ pub trait JournalFace: Send + Sync {
     /// Mint facts for an actor (§3.3 tier rule) — hydration
     /// reconstructs grant sets from these, on top of spawn rows.
     fn mints(&self, context: &str, actor: &str) -> Result<Vec<MintFact>, JournalError>;
+    /// Ops committed but not yet synced to a durability target.
+    /// The hot face returns them; a durability face returns empty.
+    /// (Round 31: pipelining overlay drain.)
+    fn unsynced_ops(&self) -> &[(String, JournalOp)] {
+        &[]
+    }
+    /// Remove the first `n` ops (post-flush truncate). Round 31.
+    fn take_ops(&mut self, _n: usize) -> Vec<(String, JournalOp)> {
+        Vec::new()
+    }
 }
 
 // ------------------------------------------------------ in-memory impl
@@ -242,6 +252,9 @@ impl CtxJournal {
 pub struct InMemoryJournal {
     clock: Box<dyn ClockFace>,
     ctxs: HashMap<String, CtxJournal>,
+    /// Op history since the last durability sync — the pipelining
+    /// overlay drained by the DurabilityDriver (round 31).
+    op_log: Vec<(String, JournalOp)>,
 }
 
 impl InMemoryJournal {
@@ -249,7 +262,19 @@ impl InMemoryJournal {
         InMemoryJournal {
             clock,
             ctxs: HashMap::new(),
+            op_log: Vec::new(),
         }
+    }
+
+    /// Ops committed but not yet synced to the durable tier.
+    pub fn unsynced_ops(&self) -> &[(String, JournalOp)] {
+        &self.op_log
+    }
+
+    /// Remove the first `n` ops (the durability driver's post-flush
+    /// truncate).
+    pub fn take_ops(&mut self, n: usize) -> Vec<(String, JournalOp)> {
+        self.op_log.drain(..n.min(self.op_log.len())).collect()
     }
 }
 
@@ -262,6 +287,7 @@ impl JournalFace for InMemoryJournal {
         let commit_ts = now;
         let mut appended: Vec<Envelope> = Vec::new();
         for op in ops {
+            self.op_log.push((context.to_string(), op.clone()));
             match op {
                 JournalOp::Append(p) => {
                     let lineage = ctx.active;

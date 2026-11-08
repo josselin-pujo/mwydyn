@@ -229,6 +229,16 @@ pub struct Context {
     by_id: HashMap<String, usize>,
     blobs: Box<dyn BlobFace>,
     journal: Box<dyn JournalFace>,
+    /// The durability target (§8.5). `None` = RAM tier (hot journal
+    /// only, no persistence). `Some` = the durability driver drains
+    /// the hot journal's op log to this face on flush (round 31:
+    /// batch + pipeline — the fsync/quorum wait amortizes across
+    /// the overlay; crash = redo unflushed activations).
+    durable: Option<Box<dyn JournalFace>>,
+    /// Index into the hot journal's op log — the sync watermark
+    /// (consumed by flush_durability when the durable face is present).
+    #[allow(dead_code)]
+    synced_through: usize,
     /// Replies to `external` land here — the embedding's drainable
     /// inbox (§3.4: the embedding's handle). The letters are ALSO
     /// journaled (everything committed is); this is the convenience
@@ -281,6 +291,8 @@ impl Context {
             by_id: HashMap::new(),
             blobs,
             journal,
+            durable: None,
+            synced_through: 0,
             external_outbox: VecDeque::new(),
             telemetry: Vec::new(),
             dead_letters: Vec::new(),
@@ -301,6 +313,55 @@ impl Context {
         .expect("the snapshots sink is the second spawn; no collision possible");
         ctx
     }
+
+    /// THE PIPELINED EXECUTOR'S DURABILITY SEAM (round 31): the hot
+    /// InMemory journal receives every commit instantly (transitions
+    /// never wait); the durable face receives batched ops on flush
+    /// — the fsync/quorum wait amortizes across the overlay. Crash
+    /// = overlay dies, durable stands, recovery replays from the
+    /// last flush (at-least-once activation redo; edge idempotency
+    /// by (context, actor, seq)).
+    pub fn with_durability(
+        name: impl Into<String>,
+        durable: Box<dyn JournalFace>,
+        blobs: Box<dyn BlobFace>,
+    ) -> Context {
+        let mut ctx = Context {
+            name: name.into(),
+            entries: Vec::new(),
+            by_name: HashMap::new(),
+            by_id: HashMap::new(),
+            blobs,
+            journal: Box::new(InMemoryJournal::new(Box::new(WallClock))),
+            durable: Some(durable),
+            synced_through: 0,
+            external_outbox: VecDeque::new(),
+            telemetry: Vec::new(),
+            dead_letters: Vec::new(),
+            strikes: HashMap::new(),
+            clock: Box::new(WallClock),
+            counters: 0,
+            next_scan: 0,
+        };
+        ctx.spawn_entry(
+            Spawn::new(Some("ticker"), Box::new(|| Box::new(Ticker::new())))
+                .supervision(Supervision::Restart),
+        )
+        .expect("the ticker is the first spawn; no collision possible");
+        ctx.spawn_entry(Spawn::new(
+            Some(SNAPSHOTS),
+            Box::new(|| Box::new(SnapshotsSink)),
+        ))
+        .expect("the snapshots sink is the second spawn; no collision possible");
+        ctx
+    }
+
+    /// The RAM combo (tests, CLI tools): hot journal only, no
+    /// durability target.
+    pub fn ram(name: impl Into<String>) -> Context {
+        Self::with_journal(name, Box::new(InMemoryJournal::new(Box::new(WallClock))))
+    }
+
 
     pub fn name(&self) -> &str {
         &self.name
@@ -843,6 +904,30 @@ impl Context {
                 }
             }
         }
+    }
+
+    /// Flush the pipelining overlay to the durable journal (§8.2 as
+    /// amended by round 31). The hot journal receives commits
+    /// instantly; this method drains its op log to the durability
+    /// target in ONE batch — the fsync/quorum wait amortizes across
+    /// the entire in-flight window. Returns the number of ops
+    /// committed.
+    pub fn flush_durability(&mut self) -> Result<usize, JournalError> {
+        let pending_ops = self.journal.unsynced_ops().len();
+        if pending_ops == 0 {
+            return Ok(0);
+        }
+        let ops = self.journal.take_ops(pending_ops);
+        let mut count = 0usize;
+        let mut by_ctx: HashMap<String, Vec<JournalOp>> = HashMap::new();
+        for (ctx, op) in ops {
+            by_ctx.entry(ctx).or_default().push(op);
+        }
+        for (ctx, ctx_ops) in &by_ctx {
+            let c = self.durable.as_mut().expect("durable checked above").commit(ctx, ctx_ops.clone())?;
+            count += c.count;
+        }
+        Ok(count)
     }
 
     /// Rewind the context to `position` on the active lineage (§8.3):
