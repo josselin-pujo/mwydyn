@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mwydyn-data",
+    "crates/mwydyn-schema",
+    "crates/mwydyn-core",
+    "crates/mwydyn-vectors",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"

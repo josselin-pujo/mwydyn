@@ -1,0 +1,7 @@
+[package]
+name = "mwydyn-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mwydyn-data = { path = "../mwydyn-data" }

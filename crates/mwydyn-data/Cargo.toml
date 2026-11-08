@@ -1,0 +1,6 @@
+[package]
+name = "mwydyn-data"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -1,0 +1,363 @@
+# mwydyn — spec v0 (skeleton)
+
+> Status: DRAFT. **DECIDED** = ratified in the 2026-11-08 charter
+> round. **OPEN** = the discussion queue, one fork at a time.
+> Provenance: `[A1:NN]` cites Athena1 `work-notes/NN` — recovered
+> specifications, not recovered code.
+
+## 0. Position [DECIDED]
+
+- mwydyn is an **embeddable WASM actor runtime** — a single-node
+  library first. Multi-node (the PaaS) is a later *distribution* of
+  the same runtime, never a prerequisite of any consumer.
+- Two actor kinds under ONE contract: **guest actors** (WASM
+  components, sandboxed) and **native actors** (Rust, compiled in —
+  the well-known services). Same contract, different trust domain.
+- The runtime never depends on Athena. Athena2 embeds it; the PaaS
+  distributes it.
+
+## 1. Data model — messages are data [DECIDED]
+
+- Encoding: Athena1's canonical CBOR profile [A1:04 §1], adopted as
+  the starting profile — deterministic RFC 8949, always-float64 for
+  non-integral numbers, no NaN/Inf/undefined, string-key-only maps
+  sorted length-first-then-bytewise, no indefinite lengths, unknown
+  tags rejected, depth/count/length limits, key hygiene. Extensions
+  require a profile version bump.
+- **Messages are data, not blob containers. Hard cap: 1 MiB per
+  message.** Reality should sit far below; the cap exists to force the
+  by-reference discipline.
+- CBOR decode runs **host-side, at the WASM barrier** (after the
+  inbox, before the guest; before the outbox) — guests never carry a
+  codec. The validation boundary is the barrier.
+- Routing and telemetry inspect **envelopes only**; payload decode
+  happens at delivery.
+
+## 2. Envelope [DECIDED in shape / OPEN in fields]
+
+- Two disjoint field groups — producer-supplied (`type`, `payload`,
+  `cause`, `correlation`, `authority`, …) and runtime-assigned
+  (identity, position, timestamps, producer identity, checksum).
+  **The runtime rejects any message arriving carrying runtime-assigned
+  fields** — the byzantine posture [A1:04 §2].
+- Ordering authority: per-actor inbox position, assigned at receive.
+  No global order; cross-actor linkage via `cause` / `correlation`
+  [A1:04 §§3–4].
+- **[DECIDED, round 09]** the field set. *Producer-supplied* (from
+  the guest `letter`): `kind` (layer-2 schema id), `payload`
+  (canonical CBOR, ≤ 1 MiB), `cause?` (provenance ref),
+  `correlation?` (exchange id — reply matching; dedup is
+  defense-in-depth, the transaction is the safety mechanism),
+  `authority` (row-cites). *Runtime-assigned* (rejected if present
+  on arrival): `seq` — message identity = `(context, seq)`, the
+  context journal's contiguous position (contiguous-or-refuse
+  [A1:04 §8]); on log tier the inbox IS a cursor over the context
+  journal; `from` (sender instance id — replies target it), `to`
+  (target address), `commitTs` (tagged timestamp, audit only, never
+  branching [A1:04 §5]), `producer` (sending actor's implementation
+  digest — provenance for blue/green and A/B forensics), `checksum`
+  (integrity over canonical CBOR). **No `ttl`** — staleness belongs
+  to dead-letter policy and timer races. Additions are envelope
+  version bumps. **No `reply-to` — owner's law:** an edge use-case
+  that is easy to implement has no place as a first-order concept;
+  reply routing is application-level (correlation matching), not
+  envelope plumbing.
+
+## 3. The actor contract [DECIDED shape / OPEN semantics]
+
+- An actor has an **inbox**, an **outbox**, and a **telemetry
+  outbox**. Telemetry is best-effort, lossy by design, never
+  backpressures business messages, and lives **outside**
+  snapshot/rollback semantics.
+- **Durability is runtime-owned and tiered**: inboxes and outboxes are
+  always durable objects; the backing tier varies per actor (RAM for
+  CLI/task actors → journaled disk for hosted). Same contract,
+  different quality knob.
+- **Task actors** are a first-class derived pattern: spawn-per-request,
+  one message in, one reply out, RAM tier, supervised by the caller,
+  die on reply. `invoke(actor, input) → output` is sugar over this —
+  the function-shaped consumers never see mailboxes unless they want to.
+### 3.1 Delivery semantics [DECIDED]
+
+- **At-least-once delivery, dedup key = correlation id** [A1:04 §4].
+  Non-idempotent actors use it to recognize redeliveries.
+- **Log owns acks.** The delivery cursor is part of the durable inbox
+  object — never separate bookkeeping — and **never carries a
+  different durability than the mailbox itself**: a RAM inbox has a
+  RAM cursor, a journaled inbox has a journaled cursor. "Processed" is
+  always a log claim.
+- Consequence: rewind re-delivers everything after the rewind point;
+  correlation dedup resolves the replays. **Crash recovery and time
+  travel are the same mechanism.**
+- **Poison letters**: a delivery-attempt count rides the mailbox (same
+  tier); advancing past a poison message is a *policy-authorized
+  cursor advance*, journaled as a dead-letter fact — so
+  dead-lettering rewinds consistently.
+- Warning label (stated, not engineered away): rewinding re-executes
+  side effects of non-idempotent messages already delivered.
+
+### 3.2 Supervision & deployment [DECIDED in principle]
+
+- **Supervision is policy, not mechanism.** The core provides
+  lifecycle facts — spawned, delivered, `crashed{trap, message,
+  cursor}`, terminal — and a policy attachment at spawn. Two named
+  built-ins:
+  - `fail-fast` — dev / live composition: a crash is terminal and
+    surfaces loudly (immediate feedback for agent-originated actors);
+  - `restart` — production: backoff, a restart-intensity window (max
+    restarts in the window → escalate / dead-letter).
+- Restart state follows the actor's state choice (§6): fresh
+  re-instantiation | last snapshot | replay-from-log.
+- Task actors map a crash to an error reply — the caller is the
+  implicit fail-fast supervisor.
+- **Single-actor, single-cursor invariant**: one actor processes one
+  message at a time; scale-out is fan-out to more actors (task
+  pattern, sharded workers), never parallel consumers on one inbox.
+  This invariant is what makes snapshot/replay coherent. Stateless
+  actors MAY offer parallel implementations — each with its own
+  mailbox. **Dispatch queues are routing primitives, not consumers**:
+  they distribute across bound backends, hold no mailbox and no
+  cursor, carry no actor semantics (§7.4).
+- **Warm pools & parking**: instance state is a cache; the
+  mailbox+cursor are the truth (the A1 substrate shape [A1:21 §5]).
+  Parking = the suspendable contract at rest; pooling = an instance
+  cache bound to a name. The PaaS composes them; the CLI never pays.
+- **No mandatory supervision tree [landed round 05]**: escalation
+  routes to the owner handle; trees are user-buildable (a native
+  actor that supervises children).
+- **Binding indirection [landed → §3.4]**: swap or split the
+  binding, never the actor.
+- Residue: bounded mailboxes & backpressure — under discussion
+  (round 05 proposal, reply pending).
+
+### 3.3 Capabilities — grant rows, minted cites [DECIDED base, round 03]
+
+- Rights are **grant rows** `{subject, verb, object}`, checked per-use
+  at every boundary — message dispatch, host-function call — against
+  the live grant set [A1 CTR-3 lesson: never infer authority from
+  anything but the live set]. Envelopes present the `authority` refs
+  they act under [A1:04 §2]. Refs are **row-cites, never bearer
+  instruments**: rows are subject-bound, so a ref copied through a
+  blob, log, or message is inert to anyone but its subject —
+  capability pointers are *addresses of rights*, not rights, and
+  moving them around is harmless by construction.
+- Verbs are **namespaced by service**: `post` / `subscribe` (the
+  message layer — the layer-2 hook), ambient service verbs
+  (`blob.read`, `blob.write`, …), control-plane verbs (`spawn`,
+  `supervise`, `bind`, `park`).
+- **Minting is attenuation-only, holder-only, and journaled**: a mint
+  cites its source row, names the grantee, and is verified by the
+  service's **attenuation algebra** — per-service pure functions
+  (`narrow(row, request) → row' | refuse`, `subsumes(a, b)`) defining
+  when a minted row is strictly narrower. No mint may widen; the
+  runtime verifies, never trusts. The algebra is where attenuation
+  complexity is tamed: it is *local* to each service's object grammar
+  and **conformance-vector tested** like everything else.
+- **Revocation cascades via lineage**: minted rows cite their parent;
+  revoking a row kills its descendants.
+- Boot: root rows come from the spawn manifest (bundle-advertised
+  caps + consent ceremonies for widening — the A1 posture, recovered
+  [A1:21 §1]).
+- Tier rule: grant-set mutations are log events for log-tier actors;
+  RAM-tier actors hold in-memory grant sets seeded at spawn.
+- **The default-deny boundary [DECIDED, round 04]**: the
+  **trust-context hybrid** — type-level authority *inside* a trust
+  context, explicit target rows *across* contexts. Owner's law,
+  verbatim: **"intra-context transparency by default, cross-context
+  ceremony."** Cross-context minting is the ceremony that makes PaaS
+  service-to-service wiring deliberate.
+- Named residual risk: the confused deputy (an actor tricked into
+  exercising its own rows on another's behalf) is inherent to held
+  authority; mitigation is attribution — every use names the row and
+  the envelope's authority refs — not possession-based redesign.
+
+### 3.4 Addressing & routing [DECIDED, rounds 04–05]
+
+- **Names** `(context, name)` — readable, unique within a trust
+  context; what actors post to. Not security objects (§3.3).
+- **Instance ids** — opaque, runtime-minted, **journaled at
+  creation** (replay-stable [A1:04 §3]); what lifecycle facts,
+  supervision, and logs cite.
+- **Bindings** — name → {implementation digest, config}. Swap =
+  blue/green; split = A/B; a **dispatch queue** = a binding whose
+  backend is a set + policy. Control-plane ops (`bind`, swap, split)
+  are capability-gated.
+- **Naming is opt-in [DECIDED, round 05]**: named actors are
+  addressable within their context, refuse-on-collision; unnamed
+  actors hold only the spawner's handle — the task actor. Escalation
+  routes to the owner handle; supervision trees are user-buildable
+  (the §3.2 proposal, ratified by consequence). A "service" = a
+  named, long-lived actor.
+- Location transparency: addresses are data; resolution is a runtime
+  concern; in-proc vs network never changes message bytes.
+
+### 3.5 Effects and transactions [DECIDED, round 07]
+
+`receive` is a **pure transition**: `(instance memory, letter,
+blob-reads) → effect list`. The runtime validates, then applies
+effects in order. Writing is declaring — there is no `post`, `put`,
+`mint`, or `emit` import.
+
+- **The transaction boundary [DECIDED, round 08]**: within the
+  receiving context, state transition + all effects commit as **one
+  atomic unit** (one journal transaction on log tier, one in-proc
+  commit on RAM tier). **Cross-context posts are NOT transactional**
+  — at-least-once eventual; multi-context consistency is saga
+  territory. Owner's law: **atomicity is only valid inside a clock
+  domain — and a trust context IS a clock domain.** Contexts break
+  clock domains deliberately: no shared clock, no single lock in the
+  sky, nothing to fall over when scale hits. The wall is one wall
+  with three names: trust boundary, clock domain, transaction
+  boundary.
+- **Validation happens before any application** (fail-before-compute):
+  structural envelope laws, sizes under the cap, authority rows
+  present, digests resolvable, capacity/caps admissible. **The core
+  is schema-blind** (§7.9, round 10): `kind` is an opaque string,
+  payloads are opaque bytes — schema validity is an edge, embedding,
+  or actor concern, never admission. Content addressing closes the
+  data-flow gap: a `put`'s digest is computed at validation, so a
+  later `post` in the same list can reference it.
+- **Two refusal classes at admission**: `busy` = temporary — the
+  *letter* re-queues at its inbox tail, no delivery attempt burned
+  (overload becomes self-healing: the actor re-receives and re-declares);
+  `invalid`/`unauthorized` = permanent — the attempt burns, N strikes
+  → the dead-letter path (§3.1).
+- **Telemetry is outside the transaction**: `emit` effects apply
+  best-effort regardless of commit or rollback — lossy by design
+  (§3.2).
+- **Reads are repeatable by contract**: imports are limited to
+  content-addressed blob reads and `caps.list` — the answer is a
+  function of the ref; a swept ref is a loud error, never changed
+  data (§4 GC is reference-aware above the live watermark).
+- Ripples: the interruptability rules (§6) are satisfied trivially —
+  imports are pure reads; checkpoints (§7.6) become trivially atomic;
+  replay-testing is vector-shaped: `(letter, seeded memory, blob
+  fixtures) → effects`.
+
+## 4. Blobs — an ambient host service [DECIDED, round 02]
+
+Blobs do NOT go through the actor model. The actor model contributes
+mutation management and ordering; blobs have neither — immutable,
+content-addressed, idempotent. Mailbox round-trips on them are
+ceremony without payoff.
+
+- The store is an **ambient host service behind the frozen WIT world**:
+  `blob.put(bytes, ttl?) → ref`, `blob.get(ref) → bytes |
+  loud-missing`, `blob.len(ref)`, `blob.get_range(ref, range)` —
+  synchronous host functions, hardcoded Rust, collocated in every
+  runtime. (Range/len exist so consumers stream without materializing
+  — docgen's PDFs.)
+- The **blob reference is a first-class CBOR extension type**
+  (tagged), shape `{ digest, mediaType, bytes }` [A1:05 §2] — blobness
+  lives in the data model, not in envelopes. Routing and telemetry
+  never see blob bytes, trivially.
+- **Blob bytes never transit messages.** The 1 MiB cap (§1) and the
+  by-reference layering law [A1:51] stay; writes happen before any
+  reference can exist.
+- **Replay-safe without journaling puts**: content addressing makes
+  `put` a pure function of bytes — a deterministic replay re-puts to
+  the identical digest. The rules that buy this: writes are
+  idempotent-by-content; **GC is reference-aware** (a digest cited by
+  any reachable log position, actor state, or snapshot is collectable
+  only above the live watermark); a missing blob is a loud integrity
+  failure, never silent divergence [A1:04 §10].
+- TTL is a `put` parameter, never an ambient default; unreferenced
+  bytes sweep by runtime GC configuration [proposed default].
+- The principle this draws: **a host service may bypass the message
+  layer only if it is deterministic** (replayable without journaling).
+  Blob is ambient; clock is not — `clock.now()` under replay diverges,
+  so clock reads must be journaled (§7.7). Randomness: mediated.
+  Timers: message-shaped (a timer event IS a message). Telemetry:
+  lossy by design, exempt from replay semantics. Query-shaped blob
+  surface (search, listing), if ever needed, is a native actor —
+  never WIT growth.
+
+## 5. Type layers [DECIDED]
+
+- **Layer 1 — the frozen WIT world**: protocol verbs only (post,
+  yield, subscribe?, snapshot, telemetry, capability ops). Frozen by
+  rule: the first host-need evolution that adds a WIT function broke
+  the freeze.
+- **Layer 2 — CBOR message schemas**: application contracts,
+  versioned, registry-disciplined. **New capability = new message
+  type + capability check, never a WIT change.** A1's evolution law
+  carries over [A1:04 §7]: within a schema version, new fields are
+  optional and consumers are tolerant readers; breaking changes bump
+  the schema version.
+- OPEN: exact verb set (§7.8); registry mechanics (§7.9).
+
+## 6. Execution [DECIDED choices / OPEN mechanisms]
+
+- Runtime: **wasmtime**. Budget knobs proven in A1's spike [A1:40]:
+  epoch-interrupt wall clock, memory limiter, optional fuel.
+- Stateful actors choose:
+  - **(a) own state via the blob service** — load/save by digest;
+    space/time-efficient, actor-complex;
+  - **(b) the suspendable contract** — the restore unit is
+    *instance state + inbox position*, under interruptability rules
+    (no threads; no reentrant host calls mid-message — inbox/outbox
+    IO is the IO).
+- Mechanism note (verify): wasmtime *live* snapshots (memory + stack +
+  PC) are not, to our knowledge, a shipped public API. (b) ships
+  **replay-backed** — persist the inbox position, deterministic replay
+  from a cold instance, hybrid checkpoint+replay later. The
+  interruptability rules are exactly replay's determinism rules, so
+  the contract is mechanism-independent. Watermark stamps at
+  consistent points [A1:21 §5] are the recovery vocabulary.
+- OPEN: checkpoint format (§7.6); the time-travel layer's API (§7.7).
+
+## 7. OPEN forks — the queue
+
+1. ~~Delivery semantics~~ — RESOLVED → §3.1 (log owns acks; cursor
+   shares the mailbox's durability tier; poison letters as journaled
+   cursor advances).
+2. ~~Supervision & restart~~ — RESOLVED in principle → §3.2
+   (supervision is policy; two built-ins; deployment rides the
+   binding indirection). Residue: bounded mailboxes & backpressure —
+   its own fork.
+3. ~~Capability model~~ — RESOLVED in principle → §3.3 (grant rows +
+   minted cites; per-service attenuation algebras; subject-bound
+   refs). Residue: the **default-deny boundary** (per-target rows vs
+   the proposed trust-context hybrid) — its own fork.
+4. ~~Addressing & routing~~ — RESOLVED → §3.4 (names + ids +
+   bindings; naming opt-in; dispatch queues as bindings). The
+   no-well-known-registry note stands: ambient primitives live in
+   the WIT world, mediated services ride capabilities + log.
+5. **Telemetry contract** — correlation propagation, span shape, drop
+   accounting.
+6. **Snapshot/replay contract** — checkpoint format, watermark
+   stamps, GC interplay with time travel.
+7. **Time-travel layer** — the optional clock/log spine for actors
+   that opt in (snapshot-enabled ⇔ spine-riding).
+8. ~~WIT verb set~~ — DRAFTED → [world-v0.wit](world-v0.wit)
+   (rounds 06–07): **effect-list shape ratified** — imports are pure
+   reads only (blob reads + `caps.list`); exports are `receive`
+   (pure transition → effects) and `boot/init`; one well-known name
+   (ticker). Rejected from v0, with reasons in work-note 06: `yield`,
+   `subscribe`, a snapshot verb, a timer verb — and, round 07, all
+   imperative write imports. OPEN within the draft: envelope field
+   set convergence (§2); `field-value` variant contents.
+9. **Schema registry** — [DECIDED, round 10]: ids
+   `<namespace>.<name>@<major>`; the envelope `kind` carries it;
+   namespaces claimed per context at composition, conflicting
+   definitions for one id refuse. **Majors immutable once ratified**
+   (a bug becomes a new major, never an edit); within a major,
+   revisions additive-only, tolerant readers mandatory — non-breaking
+   evolution for sources and sinks composed from **distinct delivery
+   lifetimes** (owner). **Two representations: CDDL authoritative**
+   (authoring), **canonical CBOR projection** (storage +
+   orthogonality); deterministic mapping, roundtrip-vector-pinned —
+   the registry practices the data model's own projection law
+   [A1:04 §1]. **The core is schema-blind — "CBOR is just CBOR"
+   (owner's law):** `kind` is an opaque string to the core; payloads
+   are opaque bytes under structural envelope laws only; no admission
+   schema checks. The registry is **queryable metadata** — a library
+   API and external-tooling surface (compatibility checks, typed
+   views) — never admission-enforced, never guest-visible in v0 (the
+   frozen world is untouched). Consumed-kind declarations: optional
+   metadata in spawn manifests, queryable, unenforced by the core.
+   v0 = static per-context registry; dynamic install is PaaS-era.
+   Vector format: JSON + CBOR hex/diag (validity / roundtrip /
+   message-verdict); A1's `cbor-v1.json` ports as the first corpus.
+10. **Multi-node boundary** — what single-node APIs must not preclude
+    (placement, parking, cross-runtime dedup).

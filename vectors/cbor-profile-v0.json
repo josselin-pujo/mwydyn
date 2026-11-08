@@ -1,0 +1,786 @@
+{
+  "cases": [
+    {
+      "expect": {
+        "hex": "f6"
+      },
+      "in": {
+        "model": {
+          "type": "null"
+        }
+      },
+      "name": "enc-null",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "f5"
+      },
+      "in": {
+        "json": true
+      },
+      "name": "enc-true",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "f4"
+      },
+      "in": {
+        "json": false
+      },
+      "name": "enc-false",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "00"
+      },
+      "in": {
+        "json": 0
+      },
+      "name": "enc-int-0",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "17"
+      },
+      "in": {
+        "json": 23
+      },
+      "name": "enc-int-23",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "1818"
+      },
+      "in": {
+        "json": 24
+      },
+      "name": "enc-int-24",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "18ff"
+      },
+      "in": {
+        "json": 255
+      },
+      "name": "enc-int-255",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "190100"
+      },
+      "in": {
+        "json": 256
+      },
+      "name": "enc-int-256",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "1a00010000"
+      },
+      "in": {
+        "json": 65536
+      },
+      "name": "enc-int-65536",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "20"
+      },
+      "in": {
+        "json": -1
+      },
+      "name": "enc-int-neg1",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "37"
+      },
+      "in": {
+        "json": -24
+      },
+      "name": "enc-int-neg24",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "3818"
+      },
+      "in": {
+        "json": -25
+      },
+      "name": "enc-int-neg25",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "3b7fffffffffffffff"
+      },
+      "in": {
+        "json": -9223372036854775808
+      },
+      "name": "enc-int-i64min",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "1b7fffffffffffffff"
+      },
+      "in": {
+        "json": 9223372036854775807
+      },
+      "name": "enc-int-i64max",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "fb400c000000000000"
+      },
+      "in": {
+        "json": 3.5
+      },
+      "name": "enc-float-3.5",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "fb4008000000000000"
+      },
+      "in": {
+        "json": 3.0
+      },
+      "name": "enc-float-3.0-floatness-preserved",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "fb3fe0000000000000"
+      },
+      "in": {
+        "json": 0.5
+      },
+      "name": "enc-float-0.5",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "6161"
+      },
+      "in": {
+        "json": "a"
+      },
+      "name": "enc-text-a",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "666d777964796e"
+      },
+      "in": {
+        "json": "mwydyn"
+      },
+      "name": "enc-text-mwydyn",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "78186162636465666768696a6b6c6d6e6f707172737475767778"
+      },
+      "in": {
+        "json": "abcdefghijklmnopqrstuvwx"
+      },
+      "name": "enc-text-24-chars",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "420102"
+      },
+      "in": {
+        "model": {
+          "hex": "0102",
+          "type": "bytes"
+        }
+      },
+      "name": "enc-bytes",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "c2488000000000000000"
+      },
+      "in": {
+        "model": {
+          "hex": "8000000000000000",
+          "sign": "pos",
+          "type": "big"
+        }
+      },
+      "name": "enc-big-2^63",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "c3488000000000000001"
+      },
+      "in": {
+        "model": {
+          "hex": "8000000000000001",
+          "sign": "neg",
+          "type": "big"
+        }
+      },
+      "name": "enc-big-neg",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "d903e900"
+      },
+      "in": {
+        "model": {
+          "micros": 0,
+          "type": "timestamp"
+        }
+      },
+      "name": "enc-timestamp-0",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "a2616101616202"
+      },
+      "in": {
+        "json": {
+          "a": 1,
+          "b": 2
+        }
+      },
+      "name": "enc-map-sorts-keys",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "a361610261620162616103"
+      },
+      "in": {
+        "json": {
+          "a": 2,
+          "aa": 3,
+          "b": 1
+        }
+      },
+      "name": "enc-map-canonical-is-not-alphabetical",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "reject": "bad-key"
+      },
+      "in": {
+        "json": {
+          "has.dot": 1
+        }
+      },
+      "name": "enc-map-rejects-dot-key",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "reject": "bad-key"
+      },
+      "in": {
+        "json": {
+          "__proto__": 1
+        }
+      },
+      "name": "enc-map-rejects-proto-key",
+      "op": "encode"
+    },
+    {
+      "expect": {
+        "hex": "a261618501fb4004000000000000f5f6a161626163616426"
+      },
+      "in": {
+        "json": {
+          "a": [
+            1,
+            2.5,
+            true,
+            null,
+            {
+              "b": "c"
+            }
+          ],
+          "d": -7
+        }
+      },
+      "name": "roundtrip-composite",
+      "op": "roundtrip"
+    },
+    {
+      "expect": {
+        "model": {
+          "type": "null"
+        }
+      },
+      "in": {
+        "hex": "f6"
+      },
+      "name": "dec-null",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "json": 24
+      },
+      "in": {
+        "hex": "190018"
+      },
+      "name": "dec-int-24-nonshortest-accepted",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "json": -9223372036854775808
+      },
+      "in": {
+        "hex": "3b7fffffffffffffff"
+      },
+      "name": "dec-int-i64min",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "model": {
+          "hex": "8000000000000000",
+          "sign": "pos",
+          "type": "big"
+        }
+      },
+      "in": {
+        "hex": "1b8000000000000000"
+      },
+      "name": "dec-int-beyond-i64-becomes-big",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "model": {
+          "hex": "ffffffffffffffff",
+          "sign": "pos",
+          "type": "big"
+        }
+      },
+      "in": {
+        "hex": "1bffffffffffffffff"
+      },
+      "name": "dec-int-u64max-becomes-big",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "model": {
+          "hex": "8000000000000000",
+          "sign": "neg",
+          "type": "big"
+        }
+      },
+      "in": {
+        "hex": "3b8000000000000000"
+      },
+      "name": "dec-neg-beyond-i64-becomes-big",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "json": 0.5
+      },
+      "in": {
+        "hex": "f93800"
+      },
+      "name": "dec-f16-accepted",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "json": 3.5
+      },
+      "in": {
+        "hex": "fa40600000"
+      },
+      "name": "dec-f32-accepted",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "json": "mwydyn"
+      },
+      "in": {
+        "hex": "666d777964796e"
+      },
+      "name": "dec-text",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "model": {
+          "hex": "0102",
+          "type": "bytes"
+        }
+      },
+      "in": {
+        "hex": "420102"
+      },
+      "name": "dec-bytes",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "model": {
+          "micros": -1,
+          "type": "timestamp"
+        }
+      },
+      "in": {
+        "hex": "d903e920"
+      },
+      "name": "dec-timestamp",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "model": {
+          "hex": "07",
+          "sign": "pos",
+          "type": "big"
+        }
+      },
+      "in": {
+        "hex": "c24107"
+      },
+      "name": "dec-tag2-minimal",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "hex": "a2616102616201"
+      },
+      "in": {
+        "hex": "a2616201616102"
+      },
+      "name": "dec-map-decodes-and-canonicalizes",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "indefinite"
+      },
+      "in": {
+        "hex": "9f"
+      },
+      "name": "rej-indefinite-array",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "indefinite"
+      },
+      "in": {
+        "hex": "ff"
+      },
+      "name": "rej-lone-break",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "malformed"
+      },
+      "in": {
+        "hex": "1c"
+      },
+      "name": "rej-reserved-additional-info",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "trailing"
+      },
+      "in": {
+        "hex": "0000"
+      },
+      "name": "rej-trailing-bytes",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "empty"
+      },
+      "in": {
+        "hex": ""
+      },
+      "name": "rej-empty-input",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "duplicate-key"
+      },
+      "in": {
+        "hex": "a2616101616102"
+      },
+      "name": "rej-duplicate-key",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "non-finite"
+      },
+      "in": {
+        "hex": "fb7ff8000000000000"
+      },
+      "name": "rej-nan",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "non-finite"
+      },
+      "in": {
+        "hex": "fb7ff0000000000000"
+      },
+      "name": "rej-infinity",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "unknown-tag"
+      },
+      "in": {
+        "hex": "c100"
+      },
+      "name": "rej-unknown-tag",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "malformed"
+      },
+      "in": {
+        "hex": "d903e96161"
+      },
+      "name": "rej-timestamp-of-text",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "bad-key"
+      },
+      "in": {
+        "hex": "a1695f5f70726f746f5f5f01"
+      },
+      "name": "rej-proto-key",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "bad-key"
+      },
+      "in": {
+        "hex": "a163612e6201"
+      },
+      "name": "rej-non-whitelist-key",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "too-deep"
+      },
+      "in": {
+        "hex": "818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818100"
+      },
+      "name": "rej-too-deep",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "json": [
+          [
+            [
+              [
+                [
+                  [
+                    [
+                      [
+                        [
+                          [
+                            [
+                              [
+                                [
+                                  [
+                                    [
+                                      [
+                                        [
+                                          [
+                                            [
+                                              [
+                                                [
+                                                  [
+                                                    [
+                                                      [
+                                                        [
+                                                          [
+                                                            [
+                                                              [
+                                                                [
+                                                                  [
+                                                                    [
+                                                                      [
+                                                                        [
+                                                                          [
+                                                                            [
+                                                                              [
+                                                                                [
+                                                                                  [
+                                                                                    [
+                                                                                      [
+                                                                                        [
+                                                                                          [
+                                                                                            [
+                                                                                              [
+                                                                                                [
+                                                                                                  [
+                                                                                                    [
+                                                                                                      [
+                                                                                                        [
+                                                                                                          [
+                                                                                                            [
+                                                                                                              [
+                                                                                                                [
+                                                                                                                  [
+                                                                                                                    [
+                                                                                                                      [
+                                                                                                                        [
+                                                                                                                          [
+                                                                                                                            [
+                                                                                                                              [
+                                                                                                                                [
+                                                                                                                                  [
+                                                                                                                                    [
+                                                                                                                                      [
+                                                                                                                                        0
+                                                                                                                                      ]
+                                                                                                                                    ]
+                                                                                                                                  ]
+                                                                                                                                ]
+                                                                                                                              ]
+                                                                                                                            ]
+                                                                                                                          ]
+                                                                                                                        ]
+                                                                                                                      ]
+                                                                                                                    ]
+                                                                                                                  ]
+                                                                                                                ]
+                                                                                                              ]
+                                                                                                            ]
+                                                                                                          ]
+                                                                                                        ]
+                                                                                                      ]
+                                                                                                    ]
+                                                                                                  ]
+                                                                                                ]
+                                                                                              ]
+                                                                                            ]
+                                                                                          ]
+                                                                                        ]
+                                                                                      ]
+                                                                                    ]
+                                                                                  ]
+                                                                                ]
+                                                                              ]
+                                                                            ]
+                                                                          ]
+                                                                        ]
+                                                                      ]
+                                                                    ]
+                                                                  ]
+                                                                ]
+                                                              ]
+                                                            ]
+                                                          ]
+                                                        ]
+                                                      ]
+                                                    ]
+                                                  ]
+                                                ]
+                                              ]
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ]
+      },
+      "in": {
+        "hex": "8181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818100"
+      },
+      "name": "dec-64-deep-ok",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "malformed"
+      },
+      "in": {
+        "hex": "61ff"
+      },
+      "name": "rej-bad-utf8",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "bad-bignum"
+      },
+      "in": {
+        "hex": "c24100"
+      },
+      "name": "rej-bignum-leading-zero",
+      "op": "decode"
+    },
+    {
+      "expect": {
+        "reject": "malformed"
+      },
+      "in": {
+        "hex": "a1656161"
+      },
+      "name": "rej-truncated-text",
+      "op": "decode"
+    }
+  ],
+  "note": "Canonical CBOR profile conformance (spec-v0 §1). Values outside the JSON projection (bytes, timestamps, bignums) use model descriptors. Rejection codes: empty | malformed | indefinite | too-deep | trailing | non-finite | unknown-tag | duplicate-key | bad-key | bad-bignum. Ports the spirit of Athena1's test-vectors/cbor-v1.json.",
+  "profile": "mwydyn-cbor-v0"
+}
