@@ -158,6 +158,9 @@ impl Mailbox {
 
 struct Entry {
     id: String,
+    /// Mirrors the binding; read by embeddings via `Handle`, kept
+    /// here so the binding and the entry cannot disagree.
+    #[allow(dead_code)]
     name: Option<String>,
     /// `None` = terminal (fail-fast crash); pending mail drains to
     /// dead letters — fail-fast is loud, never silently holding.
