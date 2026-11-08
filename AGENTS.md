@@ -38,6 +38,12 @@ the owner-sanctioned in-core default feature),
 NON-DETERMINISTIC BUT RECORDED (round 21: the journal is law — races
 are real-time only, the recording is what happened; replay follows
 the journal; transitions run in parallel, commits serialize),
+THE ACTOR CONTRACT STAYS SYNC FOREVER (round 30: Actor never grows
+async — await is already implemented by the runtime [letters are the
+resume]; async-LOOKING ergonomics live in SDKs as local lowerings
+[Router / correlation tables / deadline-races / pinned-future
+drivers], deferred to first need — compiler trickery crosses the
+bridge only when no dispatch alternative exists),
 APACHE-2.0 + LICENSE ADMISSION LIST (round 24: pure Apache-2.0
 project license; linked copyleft GPL/AGPL/LGPL/SSPL refused —
 external services don't propagate, only linked crates; every new
