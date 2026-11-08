@@ -79,6 +79,7 @@ name = "mwydyn-core"
 version = "0.1.0"
 dependencies = [
  "mwydyn-data",
+ "mwydyn-schema",
 ]
 
 [[package]]

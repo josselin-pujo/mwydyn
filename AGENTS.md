@@ -49,7 +49,17 @@ validate-all → classify → apply+commit); mailbox+cursor as one
 object; FailFast/Restart; ticker on an injected ClockFace (durations
 never timestamps); RamBlobStore with verify-on-read (hash-bound
 types); round-robin delivery (a busy actor must not starve
-neighbors — rotating scan start, work-notes/15). 10 walking tests +
-4 units + 2 corpora green, clippy clean. **Next:** task-pattern
-sugar; timer schemas into `mwydyn-schema` (first CDDL + registry);
-then M2 — the journal face, cursor leaves memory.
+neighbors — rotating scan start, work-notes/15). **Round 16:
+ALLOCATION IS NOT AN EFFECT** — blob.put is an eager ambient call
+(`Host::blob_put`, ref in hand), not an effect; effects = post/
+mint/emit only; world draft v0.3 (`ambient` interface). 10 walking
+tests + 4 units + 2 corpora green, clippy clean. **Round 17:
+`mwydyn-schema` lives** (registry: idempotent claims, conflict
+refusal, digest-pinned projections; core schemas
+`mwydyn.timer.{arm,tick,poll}@1` ship in every context — CDDL
+carried verbatim, validation-by-CDDL is M1+). **The external outbox
+landed** — posts to `Instance("external")` drain via
+`drain_external()` (the embedding's handle, §3.4); `spawn_task` +
+`call_task` are the task pattern as verbs. **Next:** M2 — the
+journal face (cursor leaves memory, contiguous seq, journaled
+ticks, rewind behind a FACE: SQLite first, distributed later).

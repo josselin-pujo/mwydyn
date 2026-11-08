@@ -6,6 +6,7 @@ use mwydyn_core::{
     Supervision, Verdict,
 };
 use mwydyn_data::{Address, DecodeOptions, Letter, Value};
+use mwydyn_schema::SchemaDef;
 
 fn addr(context: &str, name: &str) -> Address {
     Address::Named {
@@ -97,17 +98,22 @@ fn admission_verdicts() {
 }
 
 #[test]
-fn permanent_refusals_strike_into_dead_letters() {
+fn replies_to_external_land_in_the_drainable_outbox() {
     let mut ctx = Context::new("c1");
     ctx.spawn(Spawn::new(Some("echo"), Box::new(|| Box::new(Echo))))
         .unwrap();
-    // Echo replies to `from` — external has no mailbox, so the reply
-    // is an unknown-target strike, three of which dead-letter it.
+    // Echo replies to `from` — external now HAS an inbox: the
+    // embedding's drainable outbox (§3.4's handle mechanism).
     let l = Letter::new("test.hi@1", b"yo".to_vec(), None, Some("c1".into()), vec![]).unwrap();
     ctx.post(&addr("c1", "echo"), l, vec![]);
     ctx.run_until_idle(50);
-    assert_eq!(ctx.dead_letters().len(), 1);
-    assert_eq!(ctx.dead_letters()[0].letter.kind, "test.hi@1");
+    let replies = ctx.drain_external();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].letter.kind, "test.echo.reply@1");
+    assert_eq!(replies[0].letter.payload, b"yo");
+    assert_eq!(replies[0].letter.correlation.as_deref(), Some("c1"));
+    assert!(ctx.drain_external().is_empty(), "drain drains");
+    assert!(ctx.dead_letters().is_empty());
 }
 
 struct Forward {
@@ -489,7 +495,9 @@ fn atomic_effects_rollback_observable_state_allocations_are_garbage() {
                 .blob_put(b"eager-garbage", "text/plain", None)
                 .expect("blob.write row held");
             vec![Effect::Post {
-                to: Address::Instance("external".into()),
+                // a NONEXISTENT instance — the strike path this test
+                // exercises (external now lands in the outbox).
+                to: Address::Instance("ins-999".into()),
                 letter: Letter::new("test.ref@1", r.digest.into_bytes(), None, None, vec![])
                     .unwrap(),
             }]
@@ -508,6 +516,7 @@ fn atomic_effects_rollback_observable_state_allocations_are_garbage() {
     // letter carrying the ref was ever committed anywhere.
     assert_eq!(ctx.dead_letters().len(), 1, "the letter struck out");
     assert_eq!(ctx.dead_letters()[0].letter.kind, "test.go@1");
+    assert!(ctx.drain_external().is_empty());
     // The allocation lingered as garbage — collectable above the
     // watermark (M3), unobservable to every actor meanwhile.
     let count = ctx.blob_count();
@@ -556,4 +565,55 @@ fn mint_requires_the_source_row() {
     ctx.run_until_idle(50);
     assert!(ctx.telemetry().iter().any(|(_, m)| m == "CAPS:role.write,role.read"),
         "mint added a row when the source was held: {:?}", ctx.telemetry());
+}
+
+struct Upper;
+
+impl Actor for Upper {
+    fn receive(&mut self, ctx: &MsgCtx, _host: &Host, letter: &Letter) -> Vec<Effect> {
+        vec![Effect::Post {
+            to: ctx.from.clone(),
+            letter: Letter::new(
+                "upper.reply@1",
+                letter.payload.to_ascii_uppercase(),
+                None,
+                letter.correlation.clone(),
+                vec![],
+            )
+            .unwrap(),
+        }]
+    }
+}
+
+#[test]
+fn call_task_is_a_one_call_round_trip() {
+    let mut ctx = Context::new("c1");
+    let req = Letter::new("upper.request@1", b"hello".to_vec(), None, None, vec![]).unwrap();
+    let reply = ctx
+        .call_task(Box::new(|| Box::new(Upper)), req)
+        .unwrap()
+        .expect("the reply arrived in the external outbox");
+    assert_eq!(reply.kind, "upper.reply@1");
+    assert_eq!(reply.payload, b"HELLO");
+    let corr = reply.correlation.expect("reply echoes the minted correlation");
+    assert!(corr.starts_with("call-"));
+    // Outbox drained of the matched reply; nothing else was pending.
+    assert!(ctx.drain_external().is_empty());
+}
+
+#[test]
+fn context_registry_ships_core_schemas_and_composes() {
+    let mut ctx = Context::new("c1");
+    for id in ["mwydyn.timer.arm@1", "mwydyn.timer.tick@1", "mwydyn.timer.poll@1"] {
+        assert!(
+            ctx.registry().lookup(id).is_some(),
+            "{id} ships with the runtime (§7.9)"
+        );
+    }
+    // Embeddings compose theirs at composition time; conflicts refuse.
+    ctx.claim_schema(SchemaDef::new("acme.thing@1", "thing = { x: int }"))
+        .unwrap();
+    assert!(ctx.registry().lookup("acme.thing@1").is_some());
+    let conflict = ctx.claim_schema(SchemaDef::new("acme.thing@1", "thing = { y: int }"));
+    assert!(conflict.is_err(), "same id, different definition — refuse");
 }

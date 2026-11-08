@@ -7,10 +7,15 @@
 use std::collections::{HashMap, VecDeque};
 
 use mwydyn_data::{Address, Envelope, Letter};
+use mwydyn_schema::{Registry, SchemaDef};
 
 use crate::actor::{Actor, CapRow, Effect, Host, Level, MsgCtx};
 use crate::blob::RamBlobStore;
 use crate::ticker::Ticker;
+
+/// The embedding's instance id — posts FROM here; replies TO it land
+/// in the drainable external outbox (§3.4: the embedding's handle).
+pub const EXTERNAL: &str = "external";
 
 /// Poison-letter strikes before the dead-letter path (§3.1's
 /// policy-authorized cursor advance).
@@ -177,6 +182,14 @@ pub struct Context {
     by_name: HashMap<String, usize>,
     by_id: HashMap<String, usize>,
     blobs: RamBlobStore,
+    /// The runtime's schema registry — seeded with the core schemas,
+    /// composed by embeddings. NEVER consulted by admission (§7.9:
+    /// the core is schema-blind); it exists for embeddings and
+    /// external tooling (typed views, compatibility checks).
+    registry: Registry,
+    /// Replies to `external` land here — the embedding's drainable
+    /// inbox (§3.4: the embedding's handle).
+    external_outbox: VecDeque<Envelope>,
     telemetry: Vec<(Level, String)>,
     dead_letters: Vec<Envelope>,
     clock: Box<dyn ClockFace>,
@@ -199,6 +212,8 @@ impl Context {
             by_name: HashMap::new(),
             by_id: HashMap::new(),
             blobs: RamBlobStore::new(),
+            registry: Registry::with(mwydyn_schema::core_schemas()),
+            external_outbox: VecDeque::new(),
             telemetry: Vec::new(),
             dead_letters: Vec::new(),
             clock: Box::new(WallClock),
@@ -227,6 +242,26 @@ impl Context {
 
     pub fn dead_letters(&self) -> &[Envelope] {
         &self.dead_letters
+    }
+
+    /// The context's schema registry — core schemas pre-claimed;
+    /// embeddings compose theirs via [`Registry::compose`]. The core
+    /// never consults it (schema-blind, §7.9).
+    pub fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
+    /// Claim a schema into the context's registry (composition-time
+    /// operation; conflicts refuse, identical digests are idempotent).
+    pub fn claim_schema(&mut self, def: SchemaDef) -> Result<String, mwydyn_schema::SchemaError> {
+        self.registry.claim(def)
+    }
+
+    /// Drain the external outbox — the embedding's replies (§3.4:
+    /// the embedding's handle). Empty until someone posts to
+    /// `Instance("external")`.
+    pub fn drain_external(&mut self) -> Vec<Envelope> {
+        self.external_outbox.drain(..).collect()
     }
 
     /// Blob-store size — diagnostics/garbage observation only. Reach-
@@ -276,6 +311,10 @@ impl Context {
             id,
             name: spec.name,
         })
+    }
+
+    fn is_external(to: &Address) -> bool {
+        matches!(to, Address::Instance(id) if id == EXTERNAL)
     }
 
     fn resolve(&self, to: &Address) -> Option<usize> {
@@ -407,6 +446,11 @@ impl Context {
                         block = Some(Block::Strike("invalid letter in effects"));
                         break;
                     }
+                    // The embedding's outbox is unbounded-by-design
+                    // (the caller drains it — §3.4's handle).
+                    if Self::is_external(to) {
+                        continue;
+                    }
                     let Some(tidx) = self.resolve(to) else {
                         block = Some(Block::Strike("unknown target in effects"));
                         break;
@@ -481,22 +525,26 @@ impl Context {
         let actor_id = self.entries[idx].id.clone();
         for eff in &effects {
             match eff {
-            Effect::Post { to, letter } => {
-                let tidx = self.resolve(to).expect("validated above");
-                let envelope = Envelope::new(
-                    letter.clone(),
-                    0,
-                    Address::Instance(actor_id.clone()),
-                    to.clone(),
-                    None,
-                    actor_id.clone(),
-                )
-                .expect("validated above");
-                self.entries[tidx].mailbox.queue.push_back(envelope);
-            }
-            Effect::Mint { verb, object, .. } => {
-                self.entries[idx].rows.push(CapRow::new(verb, object));
-            }
+                Effect::Post { to, letter } => {
+                    let envelope = Envelope::new(
+                        letter.clone(),
+                        0,
+                        Address::Instance(actor_id.clone()),
+                        to.clone(),
+                        None,
+                        actor_id.clone(),
+                    )
+                    .expect("validated above");
+                    if Self::is_external(to) {
+                        self.external_outbox.push_back(envelope);
+                    } else {
+                        let tidx = self.resolve(to).expect("validated above");
+                        self.entries[tidx].mailbox.queue.push_back(envelope);
+                    }
+                }
+                Effect::Mint { verb, object, .. } => {
+                    self.entries[idx].rows.push(CapRow::new(verb, object));
+                }
                 Effect::Emit { level, message } => {
                     self.telemetry.push((*level, message.clone()));
                 }
@@ -542,6 +590,54 @@ impl Context {
                 }
             }
         }
+    }
+
+    /// Drive the context until no message is deliverable. `max_passes`
+    /// bounds livelock (a permanent busy-loop is a bug, and the bound
+    /// makes it a visible one).
+    /// The task pattern (§3.4): an unnamed, fail-fast, RAM-tier
+    /// actor addressed by its handle — scale-to-zero by lifecycle.
+    pub fn spawn_task(
+        &mut self,
+        factory: Box<dyn Fn() -> Box<dyn Actor>>,
+        init_spec: &[u8],
+    ) -> Result<Handle, SpawnError> {
+        self.spawn(
+            Spawn::new(None, factory)
+                .supervision(Supervision::FailFast)
+                .init_spec(init_spec),
+        )
+    }
+
+    /// `call_task` — the embedding's one-call round trip: spawn an
+    /// unnamed task, post the request under a minted correlation, run
+    /// to quiescence, return the reply from the external outbox.
+    /// (Correlations minted here are reply-matching, §2.)
+    pub fn call_task(
+        &mut self,
+        factory: Box<dyn Fn() -> Box<dyn Actor>>,
+        mut request: Letter,
+    ) -> Result<Option<Letter>, SpawnError> {
+        self.counters += 1;
+        let correlation = format!("call-{}", self.counters);
+        request.correlation = Some(correlation.clone());
+        let handle = self.spawn_task(factory, &[])?;
+        let verdict = self.post(&Address::Instance(handle.id.clone()), request, Vec::new());
+        if verdict != Verdict::Accepted {
+            return Ok(None);
+        }
+        self.run_until_idle(200);
+        let mut found = None;
+        let mut keep = VecDeque::new();
+        while let Some(e) = self.external_outbox.pop_front() {
+            if found.is_none() && e.letter.correlation.as_deref() == Some(&correlation) {
+                found = Some(e.letter);
+            } else {
+                keep.push_back(e);
+            }
+        }
+        self.external_outbox = keep;
+        Ok(found)
     }
 
     /// Drive the context until no message is deliverable. `max_passes`
