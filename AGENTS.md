@@ -51,9 +51,12 @@ posture as types, kind syntax pinned, canonical form + checksum;
 unit tests green). **`mwydyn-core` RUNS** (work-notes/15): native
 actors over `receive(ctx, host, letter) → effects` (MsgCtx = runtime-
 minted from, read-only); four-phase effects engine (transition →
-validate-all → classify → apply+commit); mailbox+cursor as one
-object; FailFast/Restart; ticker on an injected ClockFace (durations
-never timestamps); RamBlobStore with verify-on-read (hash-bound
+validate-all → classify → journal-commit); **the mailbox IS a cursor
+over the journal** (M2 part 2, work-notes/22: Mailbox struct GONE,
+one journal transaction per receive, busy = no commit at all,
+`Context::rewind` forks ghost branches, `Host::ghost_read` behind
+`ghost.read` caps — solid gate, three-way tested); FailFast/Restart;
+ticker on an injected ClockFace (durations never timestamps); RamBlobStore with verify-on-read (hash-bound
 types); round-robin delivery (a busy actor must not starve
 neighbors — rotating scan start, work-notes/15). **Round 16:
 ALLOCATION IS NOT AN EFFECT** — blob.put is an eager ambient call

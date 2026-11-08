@@ -4,7 +4,8 @@
 //! import, only reads (§3.5).
 
 use crate::blob::{BlobAccess, BlobRef, RamBlobStore};
-use mwydyn_data::{Address, Letter};
+use crate::journal::JournalFace;
+use mwydyn_data::{Address, Envelope, Letter};
 
 /// Telemetry levels (§3.2: lossy by design, outside the transaction).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,17 +65,28 @@ impl CapRow {
 
 /// The read face receive sees — the native mirror of the frozen
 /// world's pure-read imports (spec §5): blob reads + caps list +
-/// the ticker's clock read. Nothing here can have effects.
+/// the ticker's clock read + the GHOST gate (§8.3). Nothing here can
+/// have observable effects.
 pub struct Host<'a> {
     blobs: &'a RamBlobStore,
+    journal: &'a dyn JournalFace,
+    context: &'a str,
     caps: &'a [CapRow],
     now_micros: i64,
 }
 
 impl<'a> Host<'a> {
-    pub(crate) fn new(blobs: &'a RamBlobStore, caps: &'a [CapRow], now_micros: i64) -> Host<'a> {
+    pub(crate) fn new(
+        blobs: &'a RamBlobStore,
+        journal: &'a dyn JournalFace,
+        context: &'a str,
+        caps: &'a [CapRow],
+        now_micros: i64,
+    ) -> Host<'a> {
         Host {
             blobs,
+            journal,
+            context,
             caps,
             now_micros,
         }
@@ -114,6 +126,31 @@ impl<'a> Host<'a> {
 
     pub fn blob_len(&self, r: &BlobRef) -> Result<u64, BlobAccess> {
         self.blob_get(r).map(|b| b.len() as u64)
+    }
+
+    /// THE GHOST GATE (§8.3, round 19): read any lineage's range —
+    /// live or ghost ("ghosts of an alternate reality": the abandoned
+    /// tail of a rewind, readable, never effect-creating). Requires a
+    /// live `ghost.read` row; per-lineage attenuation is the object
+    /// grammar (`ghost.read:*` or `ghost.read:<lineage-id>`).
+    /// Default-off everywhere — the owner's "solid gate now": the
+    /// granted path is TESTED even though no consumer flips it yet.
+    pub fn ghost_read(
+        &self,
+        lineage: u64,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<Envelope>, BlobAccess> {
+        let held = self
+            .caps
+            .iter()
+            .any(|row| row.holds("ghost.read", &lineage.to_string()));
+        if !held {
+            return Err(BlobAccess::Unauthorized);
+        }
+        self.journal
+            .read(self.context, lineage, from, to)
+            .map_err(|_| BlobAccess::Missing)
     }
 
     /// The LIVE grant set — introspection, never authority (§3.3).

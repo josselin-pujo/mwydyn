@@ -231,7 +231,7 @@ fn effect_busy_requeues_without_burning_attempts() {
     assert!(ctx
         .telemetry()
         .iter()
-        .any(|(lvl, m)| *lvl == Level::Debug && m.contains("requeued")));
+        .any(|(lvl, m)| *lvl == Level::Debug && m.contains("left pending")));
 }
 
 struct Panicky;
@@ -598,4 +598,175 @@ fn call_task_is_a_one_call_round_trip() {
     assert!(corr.starts_with("call-"));
     // Outbox drained of the matched reply; nothing else was pending.
     assert!(ctx.drain_external().is_empty());
+}
+
+struct GhostProbe;
+
+impl Actor for GhostProbe {
+    fn receive(&mut self, _ctx: &MsgCtx, host: &Host, letter: &Letter) -> Vec<Effect> {
+        if letter.kind != "test.probe@1" {
+            return vec![];
+        }
+        let v = mwydyn_data::decode(&letter.payload, &DecodeOptions::default()).expect("probe");
+        let Value::Map(pairs) = v else {
+            panic!("probe payload");
+        };
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == k)
+                .and_then(|(_, v)| if let Value::Int(n) = v { Some(*n as u64) } else { None })
+                .expect("probe field")
+        };
+        let (lineage, from, to) = (get("lineage"), get("from"), get("to"));
+        match host.ghost_read(lineage, from, to) {
+            Ok(envs) => envs
+                .iter()
+                .map(|e| Effect::Emit {
+                    level: Level::Info,
+                    message: format!("GHOST:{}", String::from_utf8_lossy(&e.letter.payload)),
+                })
+                .collect(),
+            Err(e) => vec![Effect::Emit {
+                level: Level::Error,
+                message: format!("GHOST-ERR:{e:?}"),
+            }],
+        }
+    }
+}
+
+fn probe_payload(lineage: u64, from: u64, to: u64) -> Vec<u8> {
+    mwydyn_data::encode(
+        &Value::map(vec![
+            ("to".into(), Value::Int(to as i64)),
+            ("lineage".into(), Value::Int(lineage as i64)),
+            ("from".into(), Value::Int(from as i64)),
+        ])
+        .expect("fixed keys"),
+    )
+}
+
+#[test]
+fn rewind_forks_a_readable_ghost_branch_behind_the_gate() {
+    let mut ctx = Context::new("c1");
+    // probe-all holds the wide grant; probe-1 the per-lineage one;
+    // probe-none holds nothing (default-off).
+    ctx.spawn(
+        Spawn::new(
+            Some("probe-all"),
+            Box::new(|| Box::new(GhostProbe)),
+        )
+        .rows(vec![CapRow::new("ghost.read", "*")]),
+    )
+    .unwrap();
+    ctx.spawn(
+        Spawn::new(
+            Some("probe-1"),
+            Box::new(|| Box::new(GhostProbe)),
+        )
+        .rows(vec![CapRow::new("ghost.read", "1")]),
+    )
+    .unwrap();
+    ctx.spawn(Spawn::new(
+        Some("probe-none"),
+        Box::new(|| Box::new(GhostProbe)),
+    ))
+    .unwrap();
+
+    // Two notes land on lineage 1 (seqs 1, 2), delivered to probe-all.
+    for payload in ["note-1", "note-2"] {
+        let l = Letter::new("test.note@1", payload.as_bytes().to_vec(), None, None, vec![]).unwrap();
+        ctx.post(&addr("c1", "probe-all"), l, vec![]);
+    }
+    ctx.run_until_idle(50);
+
+    // Rewind to 1: note-2 (seq 2) becomes a ghost of the alternate
+    // reality; actors restart fresh.
+    let new_lineage = ctx.rewind(1).expect("rewind forks");
+    assert_eq!(new_lineage, 2);
+    let lins = {
+        // lineages are observable through a fresh probe's ghost read
+        // of lineage 1's SHARED prefix — this also proves the prefix
+        // survives the fork for granted readers.
+        let l = Letter::new(
+            "test.probe@1",
+            probe_payload(1, 1, 1),
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        ctx.post(&addr("c1", "probe-all"), l, vec![]);
+        ctx.run_until_idle(50);
+        assert!(ctx.telemetry().iter().any(|(_, m)| m == "GHOST:note-1"));
+        let l = Letter::new(
+            "test.probe@1",
+            probe_payload(1, 2, 2),
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        ctx.post(&addr("c1", "probe-all"), l, vec![]);
+        ctx.run_until_idle(50);
+        assert!(
+            ctx.telemetry().iter().any(|(_, m)| m == "GHOST:note-2"),
+            "the ghost is readable by the wide grant"
+        );
+    };
+
+    // Per-lineage attenuation: probe-1 may read lineage 1, not the
+    // active lineage 2.
+    let l = Letter::new(
+        "test.probe@1",
+        probe_payload(1, 2, 2),
+        None,
+        None,
+        vec![],
+    )
+    .unwrap();
+    ctx.post(&addr("c1", "probe-1"), l, vec![]);
+    ctx.run_until_idle(50);
+    assert!(ctx.telemetry().iter().any(|(_, m)| m == "GHOST:note-2"));
+
+    let l = Letter::new(
+        "test.probe@1",
+        probe_payload(2, 2, 2),
+        None,
+        None,
+        vec![],
+    )
+    .unwrap();
+    ctx.post(&addr("c1", "probe-1"), l, vec![]);
+    ctx.run_until_idle(50);
+    assert!(ctx
+        .telemetry()
+        .iter()
+        .any(|(_, m)| m.contains("GHOST-ERR:Unauthorized")));
+
+    // Default-off: the grantless probe is denied outright.
+    let l = Letter::new(
+        "test.probe@1",
+        probe_payload(1, 2, 2),
+        None,
+        None,
+        vec![],
+    )
+    .unwrap();
+    ctx.post(&addr("c1", "probe-none"), l, vec![]);
+    ctx.run_until_idle(50);
+    assert!(ctx
+        .telemetry()
+        .iter()
+        .any(|(_, m)| m.contains("GHOST-ERR:Unauthorized")));
+    // And the grantless probe produced no ghost reads at all.
+    let none_ghosts = ctx
+        .telemetry()
+        .iter()
+        .filter(|(_, m)| m == "GHOST:note-2")
+        .count();
+    assert_eq!(
+        none_ghosts, 2,
+        "exactly the two GRANTED probes read the ghost (wide + per-lineage)"
+    );
 }

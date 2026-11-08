@@ -51,12 +51,16 @@ pub enum JournalOp {
     Mint { actor: String, verb: String, object: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Commit {
     pub lineage: u64,
     pub first_seq: u64,
     pub count: usize,
     pub commit_ts: i64,
+    /// The stamped envelopes for this transaction's APPENDS — identity,
+    /// timestamps, checksums filled. Callers that hold refs (the
+    /// external outbox view) take them from here.
+    pub appended: Vec<Envelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,12 +218,14 @@ impl JournalFace for InMemoryJournal {
         let mut first_seq: Option<u64> = None;
         let mut count = 0usize;
         let commit_ts = now;
+        let mut appended: Vec<Envelope> = Vec::new();
         for op in ops {
             match op {
                 JournalOp::Append(p) => {
                     let lineage = ctx.active;
                     let seq = ctx.next_seq(lineage);
                     let env = ctx.stamp(&p, lineage, seq, now)?;
+                    appended.push(env.clone());
                     ctx.entries.insert((lineage, seq), env);
                     ctx.local_max.insert(lineage, seq);
                     if !p.to_actor.is_empty() {
@@ -294,6 +300,7 @@ impl JournalFace for InMemoryJournal {
             first_seq: first_seq.unwrap_or(0),
             count,
             commit_ts,
+            appended,
         })
     }
 

@@ -1,8 +1,12 @@
 //! The context (spec §3): the trust context is the clock domain is
-//! the transaction boundary (round 08) — one wall, three names. RAM
-//! tier: mailboxes are VecDeques, the cursor rides the same memory
-//! (the round-01 durability rule, trivially), and the atomic commit
-//! is validate-all-then-apply-all (§3.5).
+//! the transaction boundary (round 08) — one wall, three names.
+//!
+//! M2: the mailbox IS a cursor over the journal (§3.1, literal).
+//! Every delivery commits ONE journal transaction — the effect posts,
+//! any mint facts, and the ack (log owns acks) — so the round-08
+//! "one journal transaction per receive" is the mechanism, not a
+//! metaphor. Rewind is a journaled fork (§8.3); abandoned tails are
+//! ghosts, readable behind the `ghost.read` cap.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -10,6 +14,7 @@ use mwydyn_data::{Address, Envelope, Letter};
 
 use crate::actor::{Actor, CapRow, Effect, Host, Level, MsgCtx};
 use crate::blob::RamBlobStore;
+use crate::journal::{InMemoryJournal, JournalError, JournalFace, JournalOp, Pending};
 use crate::ticker::Ticker;
 
 /// The embedding's instance id — posts FROM here; replies TO it land
@@ -58,7 +63,10 @@ pub struct Spawn {
 }
 
 impl Spawn {
-    pub fn new(name: Option<&str>, factory: Box<dyn Fn() -> Box<dyn Actor> + Send>) -> Spawn {
+    pub fn new(
+        name: Option<&str>,
+        factory: Box<dyn Fn() -> Box<dyn Actor> + Send>,
+    ) -> Spawn {
         Spawn {
             name: name.map(|s| s.to_string()),
             factory,
@@ -110,6 +118,8 @@ pub struct Handle {
 /// whatever sits behind it (§6: clock obliviousness for everyone
 /// else). Tests inject a manual clock; determinism is preserved.
 /// Send + Sync per the multithread-readiness bounds (round 21).
+/// NOTE: `set_clock` moves the HOST face's clock; the journal's
+/// commitTs clock is fixed at construction (`with_journal`).
 pub trait ClockFace: Send + Sync {
     fn now_micros(&self) -> i64;
 }
@@ -136,46 +146,24 @@ impl ClockFace for ManualClock {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PumpStats {
-    pub delivered: usize,
-    pub busy_refusals: usize,
-    pub dead_lettered: usize,
-}
-
-struct Mailbox {
-    queue: VecDeque<Envelope>,
-    /// Delivery cursor — part of the SAME durable object as the
-    /// queue, never separate bookkeeping (§3.1: log owns acks; on
-    /// the RAM tier both are memory, same tier trivially).
-    cursor: u64,
-    /// Strikes on the queue-front message (poison letters, §3.1).
-    attempts: u64,
-    bound: usize,
-}
-
-impl Mailbox {
-    fn new(bound: usize) -> Mailbox {
-        Mailbox {
-            queue: VecDeque::new(),
-            cursor: 0,
-            attempts: 0,
-            bound,
-        }
-    }
+    /// Progress passes — deliveries, busy re-passes, and dead-letter
+    /// drains all count (they all moved the world). The precise
+    /// record of refusals lives in telemetry.
+    pub passes: usize,
 }
 
 struct Entry {
     id: String,
-    /// Mirrors the binding; read by embeddings via `Handle`, kept
-    /// here so the binding and the entry cannot disagree.
-    #[allow(dead_code)]
-    name: Option<String>,
     /// `None` = terminal (fail-fast crash); pending mail drains to
     /// dead letters — fail-fast is loud, never silently holding.
     actor: Option<Box<dyn Actor>>,
     factory: Box<dyn Fn() -> Box<dyn Actor> + Send>,
     supervision: Supervision,
     rows: Vec<CapRow>,
-    mailbox: Mailbox,
+    /// Mailbox bound — busy checks read the journal's pending count
+    /// against this (§3.2). The queue itself lives in the journal
+    /// (§3.1: the mailbox IS a cursor over the context journal).
+    bound: usize,
 }
 
 pub struct Context {
@@ -184,11 +172,21 @@ pub struct Context {
     by_name: HashMap<String, usize>,
     by_id: HashMap<String, usize>,
     blobs: RamBlobStore,
+    journal: Box<dyn JournalFace>,
     /// Replies to `external` land here — the embedding's drainable
-    /// inbox (§3.4: the embedding's handle).
+    /// inbox (§3.4: the embedding's handle). The letters are ALSO
+    /// journaled (everything committed is); this is the convenience
+    /// view.
     external_outbox: VecDeque<Envelope>,
     telemetry: Vec<(Level, String)>,
+    /// RAM mirror of the journal's dead-letter facts (the fact is the
+    /// truth; this is the accessor).
     dead_letters: Vec<Envelope>,
+    /// Poison-letter strikes, keyed (actor, seq) — RUNTIME bookkeeping
+    /// on the mailbox tier, deliberately NOT journaled (retry policy
+    /// state; a crash resetting strikes just re-tries, which
+    /// at-least-once permits).
+    strikes: HashMap<(String, u64), u64>,
     clock: Box<dyn ClockFace>,
     counters: u64,
     /// Round-robin scan start — a perpetually-requeued actor must
@@ -198,20 +196,28 @@ pub struct Context {
 }
 
 impl Context {
-    /// A context ships with its ticker collocated (rounds 02/04:
-    /// ambient services live in the runtime; the ticker is the one
-    /// well-known NAME). The runtime mounts it through the internal
-    /// path — the reservation exists for EXTERNAL callers.
+    /// A context ships with its ticker collocated (rounds 02/04)
+    /// and an in-memory journal. For a durable context:
+    /// `Context::with_journal(name, Box::new(SQLiteJournal::open(..)))`.
     pub fn new(name: impl Into<String>) -> Context {
+        Context::with_journal(name, Box::new(InMemoryJournal::new(Box::new(WallClock))))
+    }
+
+    /// The journal face is injected — the durability tier IS the
+    /// face choice (§8.5: InMemory for RAM tier, SQLite for log
+    /// tier, external providers later).
+    pub fn with_journal(name: impl Into<String>, journal: Box<dyn JournalFace>) -> Context {
         let mut ctx = Context {
             name: name.into(),
             entries: Vec::new(),
             by_name: HashMap::new(),
             by_id: HashMap::new(),
             blobs: RamBlobStore::new(),
+            journal,
             external_outbox: VecDeque::new(),
             telemetry: Vec::new(),
             dead_letters: Vec::new(),
+            strikes: HashMap::new(),
             clock: Box::new(WallClock),
             counters: 0,
             next_scan: 0,
@@ -228,6 +234,8 @@ impl Context {
         &self.name
     }
 
+    /// Moves the HOST face's clock (ticker reads, host-side views).
+    /// The journal's commitTs clock is fixed at construction.
     pub fn set_clock(&mut self, clock: Box<dyn ClockFace>) {
         self.clock = clock;
     }
@@ -240,9 +248,7 @@ impl Context {
         &self.dead_letters
     }
 
-    /// Drain the external outbox — the embedding's replies (§3.4:
-    /// the embedding's handle). Empty until someone posts to
-    /// `Instance("external")`.
+    /// Drain the external outbox — the embedding's replies (§3.4).
     pub fn drain_external(&mut self) -> Vec<Envelope> {
         self.external_outbox.drain(..).collect()
     }
@@ -274,17 +280,22 @@ impl Context {
         let mut actor = (spec.factory)();
         let entry_idx = self.entries.len();
         {
-            let host = Host::new(&self.blobs, &spec.rows, self.clock.now_micros());
+            let host = Host::new(
+                &self.blobs,
+                &*self.journal,
+                &self.name,
+                &spec.rows,
+                self.clock.now_micros(),
+            );
             actor.init(&host, &spec.init_spec);
         }
         self.entries.push(Entry {
             id: id.clone(),
-            name: spec.name.clone(),
             actor: Some(actor),
             factory: spec.factory,
             supervision: spec.supervision,
             rows: spec.rows,
-            mailbox: Mailbox::new(spec.mailbox_bound),
+            bound: spec.mailbox_bound,
         });
         if let Some(n) = &spec.name {
             self.by_name.insert(n.clone(), entry_idx);
@@ -316,9 +327,8 @@ impl Context {
     }
 
     /// External post (the embedding caller speaks from `external`).
-    /// Structural admission only (round 10: the core is schema-blind)
-    /// with the coarse refusal vocabulary — never a finer word than
-    /// `busy | unauthorized | unknown-target | invalid`.
+    /// The letter is JOURNALED first — write-before-delivery (§8.2) —
+    /// then it is simply *pending*: delivery reads the journal.
     pub fn post(&mut self, to: &Address, letter: Letter, authority: Vec<String>) -> Verdict {
         let mut letter = letter;
         letter.authority = authority;
@@ -328,26 +338,27 @@ impl Context {
         let Some(idx) = self.resolve(to) else {
             return Verdict::Refused(RefuseReason::UnknownTarget);
         };
-        let envelope = Envelope::new(
-            letter,
-            0, // seq is minted at commit on the log tier; the RAM tier runs on the cursor
-            Address::Instance("external".into()),
-            to.clone(),
-            None,
-            "external",
-        )
-        .expect("letter validated above");
-        let bound = self.entries[idx].mailbox.bound;
-        if self.entries[idx].mailbox.queue.len() >= bound {
+        let to_actor = self.entries[idx].id.clone();
+        let bound = self.entries[idx].bound;
+        if self.journal.pending_count(&self.name, &to_actor).unwrap_or(0) >= bound {
             return Verdict::Refused(RefuseReason::Busy);
         }
-        self.entries[idx].mailbox.queue.push_back(envelope);
+        let _ = self.journal.commit(
+            &self.name,
+            vec![JournalOp::Append(Pending {
+                letter,
+                from: Address::Instance(EXTERNAL.into()),
+                to_actor,
+                to: to.clone(),
+                producer: EXTERNAL.into(),
+            })],
+        );
         Verdict::Accepted
     }
 
     /// Deliver ONE message, round-robin from `next_scan` —
-    /// deterministic AND fair: a perpetually-busy actor cannot starve
-    /// its neighbors. Returns false when nothing was deliverable.
+    /// deterministic AND fair. Returns false when nothing was
+    /// deliverable.
     fn deliver_one(&mut self) -> bool {
         let n = self.entries.len();
         if n == 0 {
@@ -356,24 +367,34 @@ impl Context {
         for k in 0..n {
             let idx = (self.next_scan + k) % n;
             let entry = &self.entries[idx];
-            if entry.actor.is_none() && !entry.mailbox.queue.is_empty() {
+            let pending = self
+                .journal
+                .pending(&self.name, &entry.id)
+                .unwrap_or_default();
+            if entry.actor.is_none() {
                 // Terminal: fail-fast is loud — never silently holding
-                // mail. Drain to dead letters.
-                let drained: Vec<Envelope> = {
-                    let entry = &mut self.entries[idx];
-                    let mut out = Vec::new();
-                    while let Some(env) = entry.mailbox.queue.pop_front() {
-                        entry.mailbox.cursor += 1;
-                        out.push(env);
+                // mail. Strike the pending letters out (journaled).
+                if !pending.is_empty() {
+                    let mut ops = Vec::new();
+                    for env in &pending {
+                        ops.push(JournalOp::DeadLetter {
+                            actor: entry.id.clone(),
+                            why: "actor terminal (fail-fast)".into(),
+                        });
+                        ops.push(JournalOp::Ack {
+                            actor: entry.id.clone(),
+                            position: env.seq,
+                        });
                     }
-                    out
-                };
-                self.dead_letters.extend(drained);
-                self.next_scan = (idx + 1) % n;
-                return true;
+                    let _ = self.journal.commit(&self.name, ops);
+                    self.dead_letters.extend(pending);
+                    self.next_scan = (idx + 1) % n;
+                    return true;
+                }
+                continue;
             }
-            if entry.actor.is_some() && !entry.mailbox.queue.is_empty() {
-                let env = entry.mailbox.queue.front().cloned().expect("non-empty");
+            if let Some(front) = pending.first() {
+                let env = front.clone();
                 self.next_scan = (idx + 1) % n;
                 return self.deliver(idx, env);
             }
@@ -387,13 +408,15 @@ impl Context {
         // crash — supervision's problem (§3.2), not the message's.
         let outcome = {
             let Context {
+                name,
                 blobs,
                 entries,
                 clock,
+                journal,
                 ..
             } = self;
             let entry = &mut entries[idx];
-            let host = Host::new(blobs, &entry.rows, clock.now_micros());
+            let host = Host::new(blobs, &**journal, name, &entry.rows, clock.now_micros());
             let ctx = MsgCtx {
                 from: env.from.clone(),
             };
@@ -413,15 +436,17 @@ impl Context {
             }
         };
 
-        // Phase 2 — validate ALL effects before applying ANY
+        // Phase 2 — validate ALL effects before committing ANY
         // (fail-before-compute, §3.5). Projected capacity counts this
-        // list's own contributions.
+        // list's own contributions. A Busy refusal commits NOTHING —
+        // the letter simply stays pending (§3.1: log owns acks), so
+        // self-healing needs no requeue machinery at all.
         enum Block {
             Busy,
             Strike(&'static str),
         }
         let mut block: Option<Block> = None;
-        let mut projected: HashMap<usize, usize> = HashMap::new();
+        let mut projected: HashMap<String, usize> = HashMap::new();
         for eff in &effects {
             match eff {
                 Effect::Post { to, letter } => {
@@ -438,9 +463,11 @@ impl Context {
                         block = Some(Block::Strike("unknown target in effects"));
                         break;
                     };
-                    let mailbox = &self.entries[tidx].mailbox;
-                    let inflight = projected.entry(tidx).or_insert(0);
-                    if mailbox.queue.len() + *inflight >= mailbox.bound {
+                    let tid = self.entries[tidx].id.clone();
+                    let bound = self.entries[tidx].bound;
+                    let inflight = projected.entry(tid.clone()).or_insert(0);
+                    let queued = self.journal.pending_count(&self.name, &tid).unwrap_or(0);
+                    if queued + *inflight >= bound {
                         block = Some(Block::Busy);
                         break;
                     }
@@ -464,37 +491,46 @@ impl Context {
             }
         }
 
-        // Phase 3 — the two refusal classes (§3.5 / round 07).
+        // Phase 3 — classify (§3.5's two refusal classes).
+        let actor_id = self.entries[idx].id.clone();
         match block {
-            // Temporary: requeue at tail, NO attempt burned — overload
-            // self-heals; the actor re-receives and re-declares.
+            // Temporary: NO commit — the letter stays pending on the
+            // journal and is re-delivered on a later pass. No attempt
+            // burned (round 07).
             Some(Block::Busy) => {
-                let entry = &mut self.entries[idx];
-                let env = entry.mailbox.queue.pop_front().expect("front exists");
-                entry.mailbox.queue.push_back(env);
                 self.telemetry.push((
                     Level::Debug,
-                    format!("{}: target busy — requeued, no attempt burned", entry.id),
+                    format!("{actor_id}: target busy — left pending, no attempt burned"),
                 ));
                 return true;
             }
-            // Permanent: burn an attempt; N strikes → the dead-letter
-            // path (the policy-authorized cursor advance, §3.1).
+            // Permanent: burn an attempt (runtime bookkeeping); N
+            // strikes → the dead-letter commit (DeadLetter fact +
+            // cursor advance, journaled together — §3.1).
             Some(Block::Strike(why)) => {
-                let entry = &mut self.entries[idx];
-                entry.mailbox.attempts += 1;
-                let attempts = entry.mailbox.attempts;
+                let key = (actor_id.clone(), env.seq);
+                let strikes = self.strikes.entry(key.clone()).or_insert(0);
+                *strikes += 1;
+                let n = *strikes;
                 self.telemetry.push((
                     Level::Warn,
-                    format!(
-                        "{}: effects refused ({why}) — attempt {attempts}",
-                        entry.id
-                    ),
+                    format!("{actor_id}: effects refused ({why}) — attempt {n}"),
                 ));
-                if attempts >= MAX_ATTEMPTS {
-                    let env = entry.mailbox.queue.pop_front().expect("front exists");
-                    entry.mailbox.cursor += 1;
-                    entry.mailbox.attempts = 0;
+                if n >= MAX_ATTEMPTS {
+                    let _ = self.journal.commit(
+                        &self.name,
+                        vec![
+                            JournalOp::DeadLetter {
+                                actor: actor_id.clone(),
+                                why: why.into(),
+                            },
+                            JournalOp::Ack {
+                                actor: actor_id.clone(),
+                                position: env.seq,
+                            },
+                        ],
+                    );
+                    self.strikes.remove(&key);
                     self.dead_letters.push(env);
                 }
                 return true;
@@ -502,49 +538,66 @@ impl Context {
             None => {}
         }
 
-        // Phase 4 — apply in order; the cursor advance rides the same
-        // step (§3.1: log owns acks — on RAM tier, validate→apply
-        // without early exits IS the atomic commit).
-        let actor_id = self.entries[idx].id.clone();
+        // Phase 4 — build ONE journal transaction: the effect posts,
+        // the mint facts, and the ack (log owns acks, §3.1; one
+        // journal transaction per receive, round 08).
+        let mut ops: Vec<JournalOp> = Vec::new();
         for eff in &effects {
             match eff {
                 Effect::Post { to, letter } => {
-                    let envelope = Envelope::new(
-                        letter.clone(),
-                        0,
-                        Address::Instance(actor_id.clone()),
-                        to.clone(),
-                        None,
-                        actor_id.clone(),
-                    )
-                    .expect("validated above");
-                    if Self::is_external(to) {
-                        self.external_outbox.push_back(envelope);
+                    let to_actor = if Self::is_external(to) {
+                        String::new()
                     } else {
-                        let tidx = self.resolve(to).expect("validated above");
-                        self.entries[tidx].mailbox.queue.push_back(envelope);
-                    }
+                        self.resolve(to)
+                            .map(|tidx| self.entries[tidx].id.clone())
+                            .expect("validated above")
+                    };
+                    ops.push(JournalOp::Append(Pending {
+                        letter: letter.clone(),
+                        from: Address::Instance(actor_id.clone()),
+                        to_actor,
+                        to: to.clone(),
+                        producer: actor_id.clone(),
+                    }));
                 }
                 Effect::Mint { verb, object, .. } => {
                     self.entries[idx].rows.push(CapRow::new(verb, object));
+                    ops.push(JournalOp::Mint {
+                        actor: actor_id.clone(),
+                        verb: verb.clone(),
+                        object: object.clone(),
+                    });
                 }
                 Effect::Emit { level, message } => {
                     self.telemetry.push((*level, message.clone()));
                 }
             }
         }
-        let entry = &mut self.entries[idx];
-        entry.mailbox.queue.pop_front();
-        entry.mailbox.cursor += 1;
-        entry.mailbox.attempts = 0;
+        ops.push(JournalOp::Ack {
+            actor: actor_id.clone(),
+            position: env.seq,
+        });
+        let commit = self.journal.commit(&self.name, ops).expect("journal commit");
+        // The external outbox view takes the stamped envelopes for
+        // letters addressed to `external` (§3.4).
+        for stamped in &commit.appended {
+            if Self::is_external(&stamped.to) {
+                self.external_outbox.push_back(stamped.clone());
+            }
+        }
+        self.strikes.remove(&(actor_id.clone(), env.seq));
         true
     }
 
     fn handle_crash(&mut self, idx: usize) {
-        self.entries[idx].mailbox.attempts += 1;
-        let supervision = self.entries[idx].supervision;
-        let attempts = self.entries[idx].mailbox.attempts;
         let id = self.entries[idx].id.clone();
+        let supervision = self.entries[idx].supervision;
+        // The front pending letter is the one that crashed us.
+        let front = self
+            .journal
+            .pending(&self.name, &id)
+            .ok()
+            .and_then(|p| p.first().map(|e| e.seq));
         match supervision {
             Supervision::FailFast => {
                 self.entries[idx].actor = None;
@@ -558,26 +611,88 @@ impl Context {
                 {
                     let entry = &mut self.entries[idx];
                     let spec: Vec<u8> = Vec::new();
-                    let host = Host::new(&self.blobs, &entry.rows, self.clock.now_micros());
-                    entry.actor.as_mut().expect("fresh from factory").init(&host, &spec);
+                    let host = Host::new(
+                        &self.blobs,
+                        &*self.journal,
+                        &self.name,
+                        &entry.rows,
+                        self.clock.now_micros(),
+                    );
+                    entry
+                        .actor
+                        .as_mut()
+                        .expect("fresh from factory")
+                        .init(&host, &spec);
                 }
+                let attempts = front
+                    .map(|seq| {
+                        let key = (id.clone(), seq);
+                        let n = self.strikes.entry(key).or_insert(0);
+                        *n += 1;
+                        *n
+                    })
+                    .unwrap_or(1);
                 self.telemetry.push((
                     Level::Warn,
                     format!("{id}: crashed — restarted fresh, attempt {attempts}"),
                 ));
-                if attempts >= MAX_ATTEMPTS {
-                    let env = self.entries[idx].mailbox.queue.pop_front().expect("front exists");
-                    self.entries[idx].mailbox.cursor += 1;
-                    self.entries[idx].mailbox.attempts = 0;
-                    self.dead_letters.push(env);
+                if let (Some(seq), true) = (front, attempts >= MAX_ATTEMPTS) {
+                    let dead = self
+                        .journal
+                        .pending(&self.name, &id)
+                        .ok()
+                        .and_then(|p| p.first().cloned());
+                    let _ = self.journal.commit(
+                        &self.name,
+                        vec![
+                            JournalOp::DeadLetter {
+                                actor: id.clone(),
+                                why: "crash loop".into(),
+                            },
+                            JournalOp::Ack {
+                                actor: id.clone(),
+                                position: seq,
+                            },
+                        ],
+                    );
+                    self.strikes.remove(&(id.clone(), seq));
+                    if let Some(env) = dead {
+                        self.dead_letters.push(env);
+                    }
                 }
             }
         }
     }
 
-    /// Drive the context until no message is deliverable. `max_passes`
-    /// bounds livelock (a permanent busy-loop is a bug, and the bound
-    /// makes it a visible one).
+    /// Rewind the context to `position` on the active lineage (§8.3):
+    /// a journaled fork. The future beyond `position` becomes a ghost
+    /// branch — readable behind `ghost.read`, never deliverable.
+    /// Actors restart FRESH: state-as-of-position is the §7.6
+    /// snapshot contract; fresh is the M2 approximation (documented).
+    pub fn rewind(&mut self, position: u64) -> Result<u64, JournalError> {
+        let c = self
+            .journal
+            .commit(&self.name, vec![JournalOp::Fork { parent_seq: position }])?;
+        for idx in 0..self.entries.len() {
+            if self.entries[idx].actor.is_some() {
+                let fresh = (self.entries[idx].factory)();
+                self.entries[idx].actor = Some(fresh);
+                let entry = &mut self.entries[idx];
+                let spec: Vec<u8> = Vec::new();
+                let host = Host::new(
+                    &self.blobs,
+                    &*self.journal,
+                    &self.name,
+                    &entry.rows,
+                    self.clock.now_micros(),
+                );
+                entry.actor.as_mut().expect("fresh").init(&host, &spec);
+            }
+        }
+        self.strikes.clear();
+        Ok(c.lineage)
+    }
+
     /// The task pattern (§3.4): an unnamed, fail-fast, RAM-tier
     /// actor addressed by its handle — scale-to-zero by lifecycle.
     pub fn spawn_task(
@@ -630,7 +745,8 @@ impl Context {
         let mut stats = PumpStats::default();
         for _ in 0..max_passes {
             // Poke poll-affine actors while they hold armed work —
-            // timers fire as messages, never as callbacks (§6).
+            // timers fire as messages, never as callbacks (§6). The
+            // poll letters are JOURNALED: on the log tier they replay.
             let pollers: Vec<usize> = self
                 .entries
                 .iter()
@@ -639,22 +755,27 @@ impl Context {
                 .map(|(i, _)| i)
                 .collect();
             for idx in pollers {
-                let poll =
-                    Letter::new("mwydyn.timer.poll@1", Vec::new(), None, None, Vec::new())
-                        .expect("fixed kind");
-                let envelope = Envelope::new(
-                    poll,
-                    0,
-                    Address::Instance("external".into()),
-                    Address::Instance(self.entries[idx].id.clone()),
+                let poll = Letter::new(
+                    crate::ticker::TIMER_POLL_KIND,
+                    Vec::new(),
                     None,
-                    "external",
+                    None,
+                    Vec::new(),
                 )
-                .expect("fixed letter");
-                self.entries[idx].mailbox.queue.push_back(envelope);
+                .expect("fixed kind");
+                let _ = self.journal.commit(
+                    &self.name,
+                    vec![JournalOp::Append(Pending {
+                        letter: poll,
+                        from: Address::Instance(EXTERNAL.into()),
+                        to_actor: self.entries[idx].id.clone(),
+                        to: Address::Instance(self.entries[idx].id.clone()),
+                        producer: EXTERNAL.into(),
+                    })],
+                );
             }
             if self.deliver_one() {
-                stats.delivered += 1;
+                stats.passes += 1;
             } else {
                 break;
             }
