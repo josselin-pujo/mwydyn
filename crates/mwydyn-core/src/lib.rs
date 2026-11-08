@@ -11,6 +11,7 @@
 pub mod actor;
 pub mod blob;
 pub mod context;
+pub mod journal;
 pub mod ticker;
 
 pub use actor::{Actor, CapRow, Effect, Host, Level, MsgCtx};
@@ -18,6 +19,9 @@ pub use blob::{BlobAccess, BlobRef, RamBlobStore};
 pub use context::{
     ClockFace, Context, Handle, ManualClock, PumpStats, RefuseReason, Spawn, SpawnError,
     Supervision, Verdict, WallClock,
+};
+pub use journal::{
+    Commit, InMemoryJournal, JournalError, JournalFace, JournalOp, LineageInfo, Pending,
 };
 pub use ticker::Ticker;
 

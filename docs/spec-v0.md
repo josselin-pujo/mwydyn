@@ -395,3 +395,73 @@ ceremony without payoff.
    message-verdict); A1's `cbor-v1.json` ports as the first corpus.
 10. **Multi-node boundary** — what single-node APIs must not preclude
     (placement, parking, cross-runtime dedup).
+
+## 8. The journal contract [DECIDED, round 19]
+
+The journal face is defined by **invariants + a provider admission
+list**, not by function signatures. A provider is a thing satisfying
+the invariants; everything else is not a provider — by name. (The
+owner's law for this domain: a strict model beats a permissive API
+with badly defined semantics.)
+
+### 8.1 Identity and order
+
+- Journal identity: `(context, lineage, seq)`. Lineages start at the
+  context root; **`fork(r)` creates lineage L′ with parent (L, r)**
+  — rewind is a journaled FACT, never a truncation [DECIDED, round
+  19; owner: "we don't erase the future from the restored point"].
+- `seq` contiguous per lineage, from 1, gap-free —
+  contiguous-or-refuse.
+- No global order across contexts.
+- `fork` joins `spawn / supervise / bind / park` as a control-plane
+  verb (§3.3) — capability-gated like the rest.
+
+### 8.2 The atomic unit
+
+- The journal's write unit is a **transaction**:
+  `{appends (letters), acks (cursor advances), facts (dead-letter,
+  mint, fork)}` — all-or-nothing at the provider's durability point.
+  Commit returns only after durable; nothing is deliverable before
+  its append is durable (write-before-delivery [A1:04 Q10]).
+- External log providers map the transaction to ONE atomic record:
+  JetStream and Kafka have no multi-message atomic publish, so the
+  batch IS the record — which is our own commit granularity anyway
+  (a receive's effects are a batch, §3.5).
+
+### 8.3 Physical, logical, ghost
+
+- Physically append-only; logically shaped by facts. No in-place
+  mutation, ever.
+- **Ghost branches** [owner's term, adopted as vocabulary]: an
+  abandoned lineage tail is READ-ONLY history — *ghosts of an
+  alternate reality*. Ghosts never deliver and never create effects;
+  they are readable. Delivery follows the ACTIVE lineage only.
+- `lineages(ctx)` lists lineages (id, parent, fork point, active);
+  `read(lineage, range)` works on ANY lineage, live or ghost.
+- Ticker coherence (no new mechanism needed): arms, polls, and ticks
+  are all letters, so the ticker's schedule replays deterministically
+  from the journal — after a rewind, the schedule rewinds itself.
+- Ghost-read authorization: **[OPEN — proposed]** a capability
+  (`ghost.read`), default-off, granted like any other row; A1
+  precedent — the model had the tool to read its previous future.
+
+### 8.4 Provider admission list
+
+- Providers MUST provide: atomic batch commit at a durable point;
+  contiguous per-lineage sequence; physically append-only with NO
+  retention loss; ordered, byte-identical replay from any position;
+  serialized writes per context (v0: single-writer — a distributed
+  face brings its own serialization, outside this contract).
+- **Admitted**: DBMS/SQLite (native fit); NATS JetStream (batch-as-
+  record; consumer acks ARE cursors); Kafka (transactional producer
+  + infinite retention + partition-per-context).
+- **Not providers, by name**: at-most-once queues; object storage
+  without atomic CAS; anything with retention-based loss.
+
+### 8.5 First implementations
+
+- `InMemoryJournal` — the RAM tier and the tests, proving the face
+  is not SQLite-shaped.
+- `SQLiteJournal` — M2's production impl: transactions give the
+  atomic batch natively; the batch record pattern is unnecessary
+  there (a DB transaction covers all rows).
