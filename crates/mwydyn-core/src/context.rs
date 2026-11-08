@@ -10,10 +10,10 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use mwydyn_data::{Address, Envelope, Letter};
+use mwydyn_data::{Address, Envelope, Letter, Value};
 
 use crate::actor::{Actor, CapRow, Effect, Host, Level, MsgCtx};
-use crate::blob::{BlobFace, RamBlobStore};
+use crate::blob::{BlobFace, BlobRef, RamBlobStore};
 use crate::journal::{InMemoryJournal, JournalError, JournalFace, JournalOp, Pending};
 use crate::ticker::Ticker;
 
@@ -24,6 +24,51 @@ pub const EXTERNAL: &str = "external";
 /// Poison-letter strikes before the dead-letter path (§3.1's
 /// policy-authorized cursor advance).
 pub const MAX_ATTEMPTS: u64 = 3;
+
+/// The snapshots sink's well-known name (runtime-reserved, collocated
+/// like the ticker — round 29).
+pub const SNAPSHOTS: &str = "snapshots";
+/// The snapshot-save kind (core schema, §7.6): payload = canonical
+/// CBOR `{name, ref}` — the actor's stable NAME keys restoration.
+pub const SNAPSHOT_SAVE_KIND: &str = "mwydyn.snapshot.save@1";
+
+/// The actor's runtime-minted identity (§7.6 boot record, round 29).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorIdentity {
+    pub id: String,
+    pub context: String,
+    /// Named actors carry responsibility: persistence keys on the
+    /// name (round 29: "legion but named"). Unnamed = ephemeral.
+    pub name: Option<String>,
+}
+
+/// The boot record (§7.6, round 29) — the host-minted kick: identity,
+/// parent handle, durable state ref, spawn config. The native mirror
+/// of world v0.5's `boot` record.
+#[derive(Debug, Clone)]
+pub struct BootRecord {
+    pub actor: ActorIdentity,
+    /// The spawner (external for composition spawns). Required —
+    /// a fresh actor's only handle for initiating.
+    pub parent: Address,
+    /// Durable state, if the journal holds a snapshot letter for
+    /// this actor's NAME on the active lineage.
+    pub snapshot: Option<BlobRef>,
+    /// Spawn config — opaque canonical CBOR, layer-2 schemas
+    /// (reserved-key discipline: `mwydyn.*` is runtime-reserved).
+    pub config: Vec<u8>,
+}
+
+/// The snapshots sink (round 29): receives `snapshot.save` letters
+/// and IGNORES them — the journal itself is the registry; the
+/// runtime boot-scans it directly for restore.
+struct SnapshotsSink;
+
+impl Actor for SnapshotsSink {
+    fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, _letter: &Letter) -> Vec<Effect> {
+        vec![] // the journal is the registry; delivery is bookkeeping
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Supervision {
@@ -167,6 +212,14 @@ struct Entry {
     /// against this (§3.2). The queue itself lives in the journal
     /// (§3.1: the mailbox IS a cursor over the context journal).
     bound: usize,
+    /// The boot record this actor was initialized with (§7.6) —
+    /// hydration re-initializes from it (snapshot restore included).
+    boot: BootRecord,
+    /// Hydration replay start: 1 without a snapshot; the snapshot's
+    /// covers position + 1 with one (the boot already restored
+    /// state-as-of-covers; replaying the covered prefix would be
+    /// redundant work with identical results).
+    replay_from: u64,
 }
 
 pub struct Context {
@@ -241,6 +294,11 @@ impl Context {
                 .supervision(Supervision::Restart),
         )
         .expect("the ticker is the first spawn; no collision possible");
+        ctx.spawn_entry(Spawn::new(
+            Some(SNAPSHOTS),
+            Box::new(|| Box::new(SnapshotsSink)),
+        ))
+        .expect("the snapshots sink is the second spawn; no collision possible");
         ctx
     }
 
@@ -309,7 +367,7 @@ impl Context {
     /// refuse-on-collision; unnamed = only the spawner's handle.
     /// `ticker` is runtime-reserved.
     pub fn spawn(&mut self, spec: Spawn) -> Result<Handle, SpawnError> {
-        if spec.name.as_deref() == Some("ticker") {
+        if matches!(spec.name.as_deref(), Some("ticker") | Some(SNAPSHOTS)) {
             return Err(SpawnError::ReservedName);
         }
         self.spawn_entry(spec)
@@ -325,6 +383,26 @@ impl Context {
         let id = format!("ins-{}", self.counters);
         let mut actor = (spec.factory)();
         let entry_idx = self.entries.len();
+
+        // §7.6 boot record: identity + parent + durable state (named
+        // actors scan the journal for their latest snapshot letter on
+        // the ACTIVE lineage; unnamed = ephemeral, no restore).
+        let snapshot = match &spec.name {
+            Some(n) => self.scan_snapshot(n),
+            None => None,
+        };
+        let replay_from = snapshot.as_ref().map(|(_, covers)| covers + 1).unwrap_or(1);
+        let boot = BootRecord {
+            actor: crate::context::ActorIdentity {
+                id: id.clone(),
+                context: self.name.clone(),
+                name: spec.name.clone(),
+            },
+            parent: Address::Instance(EXTERNAL.into()),
+            snapshot: snapshot.as_ref().map(|(r, _)| r.clone()),
+            config: spec.init_spec.clone(),
+        };
+
         {
             let host = Host::new(
                 &self.blobs,
@@ -333,7 +411,7 @@ impl Context {
                 &spec.rows,
                 self.clock.now_micros(),
             );
-            actor.init(&host, &spec.init_spec);
+            actor.init(&host, &boot);
         }
         self.entries.push(Entry {
             id: id.clone(),
@@ -343,6 +421,8 @@ impl Context {
             rows: spec.rows.clone(),
             base_rows: spec.rows,
             bound: spec.mailbox_bound,
+            boot,
+            replay_from,
         });
         if let Some(n) = &spec.name {
             self.by_name.insert(n.clone(), entry_idx);
@@ -397,10 +477,62 @@ impl Context {
                 from: Address::Instance(EXTERNAL.into()),
                 to_actor,
                 to: to.clone(),
+                ack: None,
                 producer: EXTERNAL.into(),
             })],
         );
         Verdict::Accepted
+    }
+
+    /// §7.6 restore scan: the latest `mwydyn.snapshot.save@1` letter
+    /// ON THE ACTIVE LINEAGE carrying `name` — (blob ref, covers).
+    /// Ghost letters are excluded by construction (active lineage
+    /// only), so a rewind automatically restores the world including
+    /// WHICH SNAPSHOTS EXIST (round 19's discipline, applied).
+    /// The position comes from the letter's runtime-stamped `ack`
+    /// (round 26/29): host-decided, exact, unforgeable.
+    fn scan_snapshot(&self, name: &str) -> Option<(BlobRef, u64)> {
+        let active = self.journal.active_lineage(&self.name).ok()?;
+        let covered = self.journal.covered(&self.name, active).ok()?;
+        let mut found: Option<(BlobRef, u64)> = None;
+        for env in self.journal.read(&self.name, active, 1, covered).ok()? {
+            if env.letter.kind != SNAPSHOT_SAVE_KIND {
+                continue;
+            }
+            let Ok(v) =
+                mwydyn_data::decode(&env.letter.payload, &mwydyn_data::DecodeOptions::default())
+            else {
+                continue;
+            };
+            let Value::Map(pairs) = v else {
+                continue;
+            };
+            let matches = pairs
+                .iter()
+                .any(|(k, v)| k == "name" && v.as_text() == Some(name));
+            if !matches {
+                continue;
+            }
+            let Some(Value::BlobRef { digest, media_type, size }) =
+                pairs.iter().find(|(k, _)| k == "ref").map(|(_, v)| v)
+            else {
+                continue;
+            };
+            // The covers position: the runtime-stamped ack (None here
+            // means the stamp predates round 26 — skip).
+            let Some(ack) = env.ack else {
+                continue;
+            };
+            found = Some((
+                BlobRef {
+                    digest: digest.clone(),
+                    media_type: media_type.clone(),
+                    size: *size,
+                },
+                ack,
+            ));
+        }
+        found // ascending scan → the LAST match is the latest
     }
 
     /// Deliver ONE message, round-robin from `next_scan` —
@@ -604,6 +736,9 @@ impl Context {
                         from: Address::Instance(actor_id.clone()),
                         to_actor,
                         to: to.clone(),
+                        // THE STAMP (round 26/29): the seq this actor
+                        // was processing — a snapshot letter's covers.
+                        ack: Some(env.seq),
                         producer: actor_id.clone(),
                     }));
                 }
@@ -657,7 +792,6 @@ impl Context {
                 self.entries[idx].actor = Some(fresh);
                 {
                     let entry = &mut self.entries[idx];
-                    let spec: Vec<u8> = Vec::new();
                     let host = Host::new(
                         &self.blobs,
                         &*self.journal,
@@ -669,7 +803,7 @@ impl Context {
                         .actor
                         .as_mut()
                         .expect("fresh from factory")
-                        .init(&host, &spec);
+                        .init(&host, &entry.boot);
                 }
                 let attempts = front
                     .map(|seq| {
@@ -725,7 +859,6 @@ impl Context {
                 let fresh = (self.entries[idx].factory)();
                 self.entries[idx].actor = Some(fresh);
                 let entry = &mut self.entries[idx];
-                let spec: Vec<u8> = Vec::new();
                 let host = Host::new(
                     &self.blobs,
                     &*self.journal,
@@ -733,7 +866,7 @@ impl Context {
                     &entry.rows,
                     self.clock.now_micros(),
                 );
-                entry.actor.as_mut().expect("fresh").init(&host, &spec);
+                entry.actor.as_mut().expect("fresh").init(&host, &entry.boot);
             }
         }
         self.strikes.clear();
@@ -814,15 +947,41 @@ impl Context {
             for m in &mints {
                 self.entries[idx].rows.push(CapRow::new(&m.verb, &m.object));
             }
-            // State: fresh instance + deterministic replay of the
-            // delivered prefix.
+            // State: fresh instance + boot re-init (snapshot restore
+            // included) + deterministic replay of the delivered
+            // letters AFTER the snapshot's covers position (the boot
+            // already restored state-as-of-covers; replaying the
+            // covered prefix would be redundant).
             let fresh = (self.entries[idx].factory)();
             self.entries[idx].actor = Some(fresh);
             let cursor = self
                 .journal
                 .cursor(&self.name, active, &id)?
                 .unwrap_or(0);
-            let letters = self.journal.letters_for(&self.name, &id, cursor)?;
+            let replay_from = self.entries[idx].replay_from;
+            let letters = self
+                .journal
+                .letters_for(&self.name, &id, cursor)?
+                .into_iter()
+                .filter(|env| env.seq >= replay_from)
+                .collect::<Vec<_>>();
+            {
+                let Context {
+                    name,
+                    blobs,
+                    entries,
+                    clock,
+                    journal,
+                    ..
+                } = self;
+                let entry = &mut entries[idx];
+                let host = Host::new(blobs, &**journal, name, &entry.rows, clock.now_micros());
+                entry
+                    .actor
+                    .as_mut()
+                    .expect("fresh above")
+                    .init(&host, &entry.boot);
+            }
             for env in letters {
                 let outcome = {
                     let Context {
@@ -901,6 +1060,7 @@ impl Context {
                         from: Address::Instance(EXTERNAL.into()),
                         to_actor: self.entries[idx].id.clone(),
                         to: Address::Instance(self.entries[idx].id.clone()),
+                        ack: None,
                         producer: EXTERNAL.into(),
                     })],
                 );

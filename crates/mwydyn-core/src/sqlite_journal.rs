@@ -65,6 +65,7 @@ impl SQLiteJournal {
                 lineage  INTEGER NOT NULL,
                 seq      INTEGER NOT NULL,
                 to_actor TEXT    NOT NULL,
+                ack      INTEGER,
                 checksum TEXT    NOT NULL,
                 blob     BLOB    NOT NULL,
                 PRIMARY KEY (context, lineage, seq)
@@ -261,6 +262,7 @@ impl JournalFace for SQLiteJournal {
                         seq,
                         p.from.clone(),
                         p.to.clone(),
+                        p.ack,
                         Some(now),
                         p.producer.clone(),
                     )
@@ -268,9 +270,9 @@ impl JournalFace for SQLiteJournal {
                     let checksum = env.checksum();
                     let blob = encode(&env.to_value());
                     tx.execute(
-                        "INSERT INTO entries (context, lineage, seq, to_actor, checksum, blob)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![context, active, seq, p.to_actor, checksum, blob],
+                        "INSERT INTO entries (context, lineage, seq, to_actor, ack, checksum, blob)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![context, active, seq, p.to_actor, p.ack.map(|v| v as i64), checksum, blob],
                     )
                     .map_err(sql_err)?;
                     appended.push(env);

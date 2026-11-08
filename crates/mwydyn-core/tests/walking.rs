@@ -1183,3 +1183,152 @@ fn durable_blobs_survive_reopen_and_gc_respects_ghost_reachability() {
     let _ = std::fs::remove_file(journal_path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(journal_path.with_extension("sqlite-shm"));
 }
+
+/// §7.6: a stateful counter — mints a snapshot letter when told;
+/// state restores from the boot's snapshot ref on reopen.
+struct StatefulCounter {
+    count: u64,
+    snapshots: Address,
+}
+
+impl Actor for StatefulCounter {
+    fn init(&mut self, host: &Host, boot: &mwydyn_core::BootRecord) {
+        // RESTORE: the boot carries the durable state ref.
+        if let Some(r) = &boot.snapshot {
+            if let Ok(bytes) = host.blob_get(r) {
+                if let Ok(s) = String::from_utf8(bytes) {
+                    if let Some(n) = s.strip_prefix("count=").and_then(|v| v.parse().ok()) {
+                        self.count = n;
+                    }
+                }
+            }
+        }
+    }
+
+    fn receive(&mut self, _ctx: &MsgCtx, host: &Host, letter: &Letter) -> Vec<Effect> {
+        match letter.kind.as_str() {
+            "test.add@1" => {
+                let add: u64 = std::str::from_utf8(&letter.payload)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                self.count += add;
+                vec![Effect::Emit {
+                    level: Level::Info,
+                    message: format!("COUNT:{}", self.count),
+                }]
+            }
+            "test.snap@1" => {
+                // Serialize state → blob (eager, ref in hand) →
+                // snapshot letter to the well-known sink. The letter
+                // carries the actor's stable NAME; the runtime stamps
+                // covers (the runtime-stamped ack) on it.
+                let bytes = format!("count={}", self.count).into_bytes();
+                let r = host
+                    .blob_put(&bytes, "application/x-mwydyn-state", None)
+                    .expect("blob.write held");
+                let ref_value = Value::BlobRef {
+                    digest: r.digest.clone(),
+                    media_type: r.media_type.clone(),
+                    size: r.size,
+                };
+                let payload = mwydyn_data::encode(
+                    &Value::map(vec![
+                        ("name".into(), Value::Text("counter".into())),
+                        (
+                            "ref".into(),
+                            Value::Bytes(mwydyn_data::encode(&ref_value)),
+                        ),
+                    ])
+                    .expect("keys"),
+                );
+                vec![Effect::Post {
+                    to: addr("c1", mwydyn_core::SNAPSHOTS),
+                    letter: Letter::new(
+                        mwydyn_core::SNAPSHOT_SAVE_KIND,
+                        payload,
+                        None,
+                        None,
+                        vec![],
+                    )
+                    .unwrap(),
+                }]
+            }
+            _ => vec![],
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "sqlite")]
+fn snapshot_letter_survives_reopen_and_restores_state_and_cursor() {
+    let dir = std::env::temp_dir();
+    let journal_path = dir.join(format!(
+        "mwydyn-snap-{}-{:?}.sqlite",
+        std::process::id(),
+        line!()
+    ));
+    let blob_path = dir.join(format!(
+        "mwydyn-snapb-{}-{:?}.sqlite",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_file(&journal_path);
+    let _ = std::fs::remove_file(&blob_path);
+
+    let spawn_counter = |ctx: &mut Context| {
+        ctx.spawn(
+            Spawn::new(
+                Some("counter"),
+                Box::new(|| {
+                    Box::new(StatefulCounter {
+                        count: 0,
+                        snapshots: addr("c1", mwydyn_core::SNAPSHOTS),
+                    })
+                }),
+            )
+            .rows(vec![CapRow::new("blob.read", "*"), CapRow::new("blob.write", "*")]),
+        )
+        .unwrap()
+    };
+
+    // ctx1: adds 1, 2 (delivered); snapshot request (save letter
+    // journaled — covers the adds); add-3 stays PENDING; die.
+    {
+        let mut ctx = Context::with_stores(
+            "c1",
+            Box::new(SQLiteJournal::open(&journal_path, Box::new(ManualClock(0))).unwrap()),
+            Box::new(SQLiteBlobStore::open(&blob_path).unwrap()),
+        );
+        spawn_counter(&mut ctx);
+        for n in ["1", "2"] {
+            let l = Letter::new("test.add@1", n.as_bytes().to_vec(), None, None, vec![]).unwrap();
+            ctx.post(&addr("c1", "counter"), l, vec![]);
+        }
+        ctx.run_until_idle(50);
+        let snap_req = Letter::new("test.snap@1", vec![], None, None, vec![]).unwrap();
+        ctx.post(&addr("c1", "counter"), snap_req, vec![]);
+        ctx.run_until_idle(50);
+        let l = Letter::new("test.add@1", b"3".to_vec(), None, None, vec![]).unwrap();
+        ctx.post(&addr("c1", "counter"), l, vec![]);
+        drop(ctx);
+    }
+
+    // ctx2: reopen, re-spawn, hydrate. The boot carries the snapshot
+    // (count=3, covering the adds); pending = add-3 only.
+    let mut ctx2 = Context::with_stores(
+        "c1",
+        Box::new(SQLiteJournal::open(&journal_path, Box::new(ManualClock(0))).unwrap()),
+        Box::new(SQLiteBlobStore::open(&blob_path).unwrap()),
+    );
+    spawn_counter(&mut ctx2);
+    ctx2.hydrate().expect("hydrate");
+    ctx2.run_until_idle(50);
+    // 1 + 2 restored FROM THE SNAPSHOT; 3 delivered live from the
+    // pending journal letter. No double-count, no loss.
+    assert!(ctx2.telemetry().iter().any(|(_, m)| m == "COUNT:6"));
+    let _ = std::fs::remove_file(&journal_path);
+    let _ = std::fs::remove_file(&blob_path);
+    let _ = std::fs::remove_file(journal_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(journal_path.with_extension("sqlite-shm"));
+}

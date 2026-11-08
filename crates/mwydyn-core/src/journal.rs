@@ -26,6 +26,10 @@ pub struct Pending {
     /// for letters no actor delivers (the external outbox).
     pub to_actor: String,
     pub to: Address,
+    /// RUNTIME-STAMPED at commit (round 26/29): the seq of the letter
+    /// the sender was processing — the snapshot `covers` position.
+    /// `None` for embedding/pump posts.
+    pub ack: Option<u64>,
     pub producer: String,
 }
 
@@ -33,6 +37,7 @@ pub struct Pending {
 /// appends, cursor advances, facts — all-or-nothing at the durability
 /// point. External providers map this to ONE atomic record.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // transactions are built one-op-at-a-time; boxing would add indirection to the hot path
 pub enum JournalOp {
     Append(Pending),
     /// Log owns acks (§3.1): the cursor advance rides the same
@@ -223,6 +228,7 @@ impl CtxJournal {
             seq,
             p.from.clone(),
             p.to.clone(),
+            p.ack,
             Some(commit_ts),
             p.producer.clone(),
         )
@@ -260,7 +266,8 @@ impl JournalFace for InMemoryJournal {
                 JournalOp::Append(p) => {
                     let lineage = ctx.active;
                     let seq = ctx.next_seq(lineage);
-                    let env = ctx.stamp(&p, lineage, seq, now)?;
+                    let mut env = ctx.stamp(&p, lineage, seq, now)?;
+                    env.ack = p.ack;
                     appended.push(env.clone());
                     ctx.entries.insert((lineage, seq), env);
                     ctx.local_max.insert(lineage, seq);

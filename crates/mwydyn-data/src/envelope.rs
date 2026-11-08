@@ -48,6 +48,12 @@ pub struct Envelope {
     /// Sender instance id — replies target it; no reply-to field.
     pub from: Address,
     pub to: Address,
+    /// RUNTIME-STAMPED (round 26/29): the seq of the letter the
+    /// sender was processing when it posted this one — "covers".
+    /// Minted in the same transaction as the sender's ack, so a
+    /// snapshot letter stamped ack=P provably covers position P.
+    /// `None` for letters posted by the embedding.
+    pub ack: Option<u64>,
     /// Tagged timestamp, audit only — never a branch input (§2).
     /// `None` on the RAM tier.
     pub commit_ts: Option<i64>,
@@ -116,6 +122,7 @@ impl Envelope {
         seq: u64,
         from: Address,
         to: Address,
+        ack: Option<u64>,
         commit_ts: Option<i64>,
         producer: impl Into<String>,
     ) -> Result<Envelope, EnvelopeError> {
@@ -128,6 +135,7 @@ impl Envelope {
             seq,
             from,
             to,
+            ack,
             commit_ts,
             producer,
         })
@@ -154,6 +162,10 @@ impl Envelope {
         Value::map(vec![
             ("to".into(), addr(&self.to)),
             ("seq".into(), Value::Int(self.seq as i64)),
+            ("ack".into(), match self.ack {
+                Some(p) => Value::Int(p as i64),
+                None => Value::Null,
+            }),
             ("from".into(), addr(&self.from)),
             ("kind".into(), Value::Text(l.kind.clone())),
             ("cause".into(), opt_text(&l.cause)),
@@ -244,6 +256,11 @@ impl Envelope {
             .and_then(Value::as_int)
             .filter(|n| *n >= 0)
             .ok_or(E)? as u64;
+        let ack = match field(pairs, "ack") {
+            Some(Value::Int(p)) if *p >= 0 => Some(*p as u64),
+            Some(Value::Null) | None => None,
+            _ => return Err(E),
+        };
         let from = addr(field(pairs, "from").ok_or(E)?).ok_or(E)?;
         let to = addr(field(pairs, "to").ok_or(E)?).ok_or(E)?;
         let commit_ts = match field(pairs, "commitTs") {
@@ -265,6 +282,7 @@ impl Envelope {
             seq,
             from,
             to,
+            ack,
             commit_ts,
             producer,
         })
@@ -344,6 +362,7 @@ mod tests {
                 context: "ctx-a".into(),
                 name: "ticker".into(),
             },
+            Some(5),
             Some(1_770_000_000_123_456),
             "sha256-impl-digest",
         )
@@ -358,6 +377,10 @@ mod tests {
         let mut d = a.clone();
         d.commit_ts = None;
         assert_ne!(a.checksum(), d.checksum(), "commitTs is checksum-bound");
+
+        let mut e = a.clone();
+        e.ack = None;
+        assert_ne!(a.checksum(), e.checksum(), "ack is checksum-bound (round 26/29)");
     }
 
     #[test]
@@ -370,6 +393,7 @@ mod tests {
                 context: "ctx-a".into(),
                 name: "ticker".into(),
             },
+            Some(5),
             None,
             "sha256-impl-digest",
         )

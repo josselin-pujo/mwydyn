@@ -199,11 +199,12 @@ pub struct MsgCtx {
 /// lands. This forbids `Rc`/non-Send state in actors *by contract*,
 /// early, while only toy actors exist to fix.
 pub trait Actor: Send {
-    /// Boot configuration kick (the `init` export of the world).
-    fn init(&mut self, _host: &Host, _spec: &[u8]) {}
+    /// Boot (§7.6, round 29): identity, parent handle, durable state
+    /// ref, config. Called once at spawn/reopen — the RESTORE point.
+    fn init(&mut self, _host: &Host, _boot: &crate::context::BootRecord) {}
 
     /// Called ONCE per inbox message, sequentially — the ABI itself
-    /// is the single-actor, single-cursor invariant made mechanical.
+    /// is the single-cursor invariant made mechanical.
     /// Long computations are fuel/epoch-bounded in the WASM tier
     /// (§6); native actors are trusted to return.
     fn receive(&mut self, ctx: &MsgCtx, host: &Host, letter: &Letter) -> Vec<Effect>;

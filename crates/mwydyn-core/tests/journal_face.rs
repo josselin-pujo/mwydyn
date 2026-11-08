@@ -22,6 +22,7 @@ fn pending(to_actor: &str, payload: &str) -> Pending {
         from: Address::Instance("external".into()),
         to_actor: to_actor.into(),
         to: Address::Instance(to_actor.into()),
+        ack: None,
         producer: "test".into(),
     }
 }

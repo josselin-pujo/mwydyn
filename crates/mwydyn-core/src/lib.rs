@@ -23,8 +23,8 @@ pub use blob::{BlobAccess, BlobFace, BlobRef, RamBlobStore};
 #[cfg(feature = "sqlite")]
 pub use sqlite_blob::SQLiteBlobStore;
 pub use context::{
-    ClockFace, Context, Handle, ManualClock, PumpStats, RefuseReason, Spawn, SpawnError,
-    Supervision, Verdict, WallClock,
+    BootRecord, ClockFace, Context, Handle, ManualClock, PumpStats, RefuseReason, SNAPSHOTS,
+    SNAPSHOT_SAVE_KIND, Spawn, SpawnError, Supervision, Verdict, WallClock,
 };
 pub use journal::{
     Commit, InMemoryJournal, JournalError, JournalFace, JournalOp, LineageInfo, MintFact,
