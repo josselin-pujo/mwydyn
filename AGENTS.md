@@ -39,7 +39,9 @@ identity includes type; digest = SHA-256(canonical CBOR of
 blob-refs-v0 (13 cases). Corpus wants are machine-generated
 (`patch-corpus` example) — never hand-type hex; encode is a
 serializer, not a validator (forged refs must be encodable for
-rejection vectors). Toolchain rustc 1.99.1. Next M0 slice: envelope +
-letter structs, then `mwydyn-core` (contexts, cursors, effects
-engine, admission, supervision, ticker, RAM blob store, task
-pattern) driven by native Rust actors + letter→verdict vectors.
+rejection vectors). Toolchain rustc 1.99.1. **Envelope + letter
+landed** ([envelope.rs](crates/mwydyn-data/src/envelope.rs) — byzantine
+posture as types, kind syntax pinned, canonical form + checksum;
+unit tests green). Next M0 slice: `mwydyn-core` (contexts, cursors,
+effects engine, admission, supervision, ticker, RAM blob store, task
+pattern) driven by native Rust actors over `receive → effects`.
