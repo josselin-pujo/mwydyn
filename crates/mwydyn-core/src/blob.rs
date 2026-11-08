@@ -76,21 +76,23 @@ impl RamBlobStore {
         Ok(r)
     }
 
-    /// Verify-on-read: (type, bytes) must hash to the ref's digest.
+    /// Lookup by content digest — the key IS the identity. No
+    /// per-read verification (round 28: verification cadence is
+    /// provider policy; the RAM store has nothing to verify).
     pub fn get(&self, r: &BlobRef) -> Result<Vec<u8>, BlobAccess> {
         let entries = self.entries.lock().expect("blob store mutex poisoned");
-        let Some((ty, bytes, _)) = entries.get(&r.digest) else {
+        let Some((_, bytes, _)) = entries.get(&r.digest) else {
             return Err(BlobAccess::Missing);
         };
-        let recomputed = Value::blob_digest(bytes, ty).map_err(|_| BlobAccess::Integrity)?;
-        if recomputed != r.digest || ty != &r.media_type || bytes.len() as u64 != r.size {
-            return Err(BlobAccess::Integrity);
-        }
         Ok(bytes.clone())
     }
 
     pub fn len(&self, r: &BlobRef) -> Option<u64> {
-        self.get(r).ok().map(|b| b.len() as u64)
+        self.entries
+            .lock()
+            .expect("blob store mutex poisoned")
+            .get(&r.digest)
+            .map(|(_, b, _)| b.len() as u64)
     }
 
     pub fn count(&self) -> usize {
@@ -98,10 +100,17 @@ impl RamBlobStore {
     }
 }
 
-/// The blob face (§4): content-addressed allocation + verified reads.
-/// Providers: RamBlobStore (RAM tier, tests) and SQLiteBlobStore
-/// (durable, `sqlite` feature) — the substrate-independence pattern
-/// from the journal (§8.5) applied to blobs.
+/// The blob face (§4): content-addressed allocation + reads.
+///
+/// The CONTRACTED invariant is **content identity**: `get`/`get_range`
+/// return the bytes that hash to the ref's digest. HOW the provider
+/// upholds that identity is PROVIDER POLICY (round 28) — eager
+/// per-read verification, a background scrub, or CAS-by-construction
+/// (a content-addressed store gets it for free). Corruption is
+/// reported loudly whenever the provider detects it (`Integrity`),
+/// but detection is never required on the read path: range reads of
+/// large objects must not force full fetches, and length queries
+/// must not force any fetch.
 pub trait BlobFace: Send + Sync {
     fn put(
         &self,
@@ -111,6 +120,16 @@ pub trait BlobFace: Send + Sync {
     ) -> Result<BlobRef, &'static str>;
     fn get(&self, r: &BlobRef) -> Result<Vec<u8>, BlobAccess>;
     fn len(&self, r: &BlobRef) -> Result<u64, BlobAccess>;
+    /// Range read: bytes in `[offset, offset + len)`, end clamped to
+    /// the blob size (empty when `offset >= size`). The DEFAULT
+    /// materializes the whole blob and slices — correct everywhere,
+    /// wrong at scale; providers with seek-backed storage override.
+    fn get_range(&self, r: &BlobRef, offset: u64, len: u64) -> Result<Vec<u8>, BlobAccess> {
+        let bytes = self.get(r)?;
+        let start = offset.min(bytes.len() as u64) as usize;
+        let end = (offset.saturating_add(len)).min(bytes.len() as u64) as usize;
+        Ok(bytes[start..end].to_vec())
+    }
     /// Reference-aware collection (round 16's law, mechanized):
     /// remove every blob whose digest is NOT in `keep`. Reachability
     /// = digests referenced by any journaled entry on any lineage
@@ -161,6 +180,15 @@ impl BlobFace for RamBlobStore {
 
     fn len(&self, r: &BlobRef) -> Result<u64, BlobAccess> {
         RamBlobStore::len(self, r).ok_or(BlobAccess::Missing)
+    }
+
+    fn get_range(&self, r: &BlobRef, offset: u64, len: u64) -> Result<Vec<u8>, BlobAccess> {
+        // The RAM store's get is a map lookup — materialization is
+        // free here.
+        let bytes = RamBlobStore::get(self, r)?;
+        let start = offset.min(bytes.len() as u64) as usize;
+        let end = offset.saturating_add(len).min(bytes.len() as u64) as usize;
+        Ok(bytes[start..end].to_vec())
     }
 
     fn retain(&self, keep: &std::collections::HashSet<String>) -> usize {

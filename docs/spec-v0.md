@@ -256,12 +256,27 @@ ceremony without payoff.
 
 - The store is an **ambient host service behind the frozen WIT world**:
   `blob.put(bytes, mediaType, ttl?) → ref`, `blob.get(ref) → bytes |
-  loud-missing`, `blob.len(ref)`, `blob.get_range(ref, range)` —
-  synchronous host functions, hardcoded Rust, collocated in every
+  loud-missing`, `blob.len(ref)`, `blob.get_range(ref, offset, len)`
+  — synchronous host functions, hardcoded Rust, collocated in every
   runtime. (Range/len exist so consumers stream without materializing
   — docgen's PDFs.) **Round 16: put is eager-during-receive, not an
   effect (§3.5) — allocation is not an effect; the ref is in the
   actor's hand the moment the call returns.**
+- **[amended round 28] Verification is PROVIDER POLICY.** The
+  contracted invariant is content identity: reads return the bytes
+  that hash to the digest. How the provider upholds that — eager
+  per-read checks, a background scrub, or CAS-by-construction — is
+  its own choice; corruption is reported loudly whenever detected.
+  Rationale: per-read verification forces full fetch + re-hash
+  before serving a RANGE of a large blob (§4's whole reason for
+  range reads); range reads must SEEK, not materialize. The ref's
+  `mediaType` is a HINT (a relabeled ref still returns true bytes);
+  dispatchers that care consult provider-truth type or sniff bytes.
+  Big blobs: atomic writes stay (the hash needs all bytes); slice-
+  per-slice assembly is done by MERGE ACTORS — platform-specific
+  actors that concat part-refs into a new ref, inheriting
+  capabilities, GC reachability, and the executor; tree-of-merges =
+  Merkle-shaped assembly without changing identity.
 - The **blob reference is a first-class CBOR type: tag 1002**
   [DECIDED, round 12; profile v0 → v0.1] wrapping
   `{ digest, mediaType, size }` — digest = 64-char lowercase hex

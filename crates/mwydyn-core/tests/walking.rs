@@ -437,7 +437,7 @@ impl Actor for Publisher {
 }
 
 #[test]
-fn blob_ref_in_hand_put_then_post_then_verified_read() {
+fn blob_ref_in_hand_put_then_post_then_read() {
     let mut ctx = Context::new("c1");
     ctx.spawn(
         Spawn::new(
@@ -461,15 +461,75 @@ fn blob_ref_in_hand_put_then_post_then_verified_read() {
     ctx.post(&addr("c1", "pub"), w, vec![]);
     ctx.run_until_idle(50);
     // Publisher eagerly put (blob.write), posted the ref, the reader
-    // verified and read it back — one pump, ref in hand throughout.
+    // read it back — one pump, ref in hand throughout.
     assert!(ctx.telemetry().iter().any(|(_, m)| m == "READ:hello"));
 
-    // A well-shaped ref whose CLAIMED TYPE does not match the stored
-    // content fails verify-on-read — loudly, per round 12's
-    // mutable-by-transit law. (An INVALID ref — uppercase digest —
-    // never reaches the actor at all: the data model rejects it at
-    // the decode; that rejection is pinned in blob-refs-v0. And a
-    // valid ref to a never-existing blob is Missing, not Integrity.)
+    // Round 28: a RANGE read seeks — the substr-backed provider
+    // serves [4..10) of "hello" wait, wrong blob; use the 16-byte
+    // pattern blob instead. The publisher puts a 16-byte pattern and
+    // range-reads a slice and a clamped over-run in the same
+    // receive, proving: no full fetch needed, end clamped.
+    struct RangePublisher {
+        reader: Address,
+    }
+    impl Actor for RangePublisher {
+        fn receive(&mut self, _ctx: &MsgCtx, host: &Host, letter: &Letter) -> Vec<Effect> {
+            if letter.kind != "test.range@1" {
+                return vec![];
+            }
+            let pattern: Vec<u8> = (0..16u32).map(|i| b"0123456789ABCDEF"[i as usize]).collect();
+            let r = host
+                .blob_put(&pattern, "application/octet-stream", None)
+                .expect("blob.write held");
+            let mut out = Vec::new();
+            // slice [4..10) → "456789"
+            match host.blob_get_range(&r, 4, 6) {
+                Ok(bytes) => out.push(Effect::Emit {
+                    level: Level::Info,
+                    message: format!("RANGE:{}", String::from_utf8_lossy(&bytes)),
+                }),
+                Err(e) => out.push(Effect::Emit {
+                    level: Level::Error,
+                    message: format!("RANGE-ERR:{e:?}"),
+                }),
+            }
+            // clamped over-run: offset 14, len 100 → "EF" (2 bytes)
+            match host.blob_get_range(&r, 14, 100) {
+                Ok(bytes) => out.push(Effect::Emit {
+                    level: Level::Info,
+                    message: format!("CLAMP:{}:{}", bytes.len(), String::from_utf8_lossy(&bytes)),
+                }),
+                Err(e) => out.push(Effect::Emit {
+                    level: Level::Error,
+                    message: format!("CLAMP-ERR:{e:?}"),
+                }),
+            }
+            out
+        }
+    }
+    ctx.spawn(
+        Spawn::new(
+            Some("rp"),
+            Box::new(|| Box::new(RangePublisher {
+                reader: addr("c1", "blob"),
+            })),
+        )
+        .rows(vec![CapRow::new("blob.read", "*"), CapRow::new("blob.write", "*")]),
+    )
+    .unwrap();
+    let rl = Letter::new("test.range@1", vec![], None, None, vec![]).unwrap();
+    ctx.post(&addr("c1", "rp"), rl, vec![]);
+    ctx.run_until_idle(50);
+    assert!(ctx.telemetry().iter().any(|(_, m)| m == "RANGE:456789"));
+    assert!(ctx.telemetry().iter().any(|(_, m)| m == "CLAMP:2:EF"));
+
+    // ROUND 28 SEMANTICS: the ref's mediaType is a HINT — content
+    // identity resolves by digest, so a ref re-labeled in transit
+    // still returns the TRUE bytes under a lying label. Type-confusion
+    // detection moved to put-time (the digest binds (bytes, type)) and
+    // to dispatchers that consult provider-truth or sniff. (An
+    // INVALID ref — uppercase digest — never resolves at all: loud
+    // Missing, pinned in blob-refs-v0.)
     let real_digest = Value::blob_digest(b"hello", "text/plain").unwrap();
     let wrong_payload = mwydyn_data::encode(&Value::BlobRef {
         digest: real_digest,
@@ -479,10 +539,7 @@ fn blob_ref_in_hand_put_then_post_then_verified_read() {
     let fr = Letter::new("test.read@1", wrong_payload, None, None, vec![]).unwrap();
     ctx.post(&addr("c1", "blob"), fr, vec![]);
     ctx.run_until_idle(50);
-    assert!(ctx
-        .telemetry()
-        .iter()
-        .any(|(_, m)| m.contains("READ-ERR:Integrity")));
+    assert!(ctx.telemetry().iter().any(|(_, m)| m == "READ:hello"));
 }
 
 #[test]

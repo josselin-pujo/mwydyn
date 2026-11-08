@@ -71,31 +71,49 @@ impl BlobFace for SQLiteBlobStore {
 
     fn get(&self, r: &BlobRef) -> Result<Vec<u8>, BlobAccess> {
         let conn = self.conn.lock().expect("blob store mutex poisoned");
-        let row: (String, Vec<u8>) = conn
+        let bytes: Vec<u8> = conn
             .query_row(
-                "SELECT media_type, bytes FROM blobs WHERE digest=?1",
+                "SELECT bytes FROM blobs WHERE digest=?1",
                 params![r.digest],
-                |row| {
-                    let ty: String = row.get(0)?;
-                    let bytes: Vec<u8> = row.get(1)?;
-                    Ok((ty, bytes))
-                },
+                |row| row.get(0),
             )
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => BlobAccess::Missing,
                 _ => BlobAccess::Integrity,
             })?;
-        let (ty, bytes) = row;
-        // verify-on-read: (type, bytes) must hash to the ref's digest
-        let recomputed = Value::blob_digest(&bytes, &ty).map_err(|_| BlobAccess::Integrity)?;
-        if recomputed != r.digest || ty != r.media_type || bytes.len() as u64 != r.size {
-            return Err(BlobAccess::Integrity);
-        }
         Ok(bytes)
     }
 
     fn len(&self, r: &BlobRef) -> Result<u64, BlobAccess> {
-        self.get(r).map(|b| b.len() as u64)
+        let conn = self.conn.lock().expect("blob store mutex poisoned");
+        conn.query_row(
+            "SELECT LENGTH(bytes) FROM blobs WHERE digest=?1",
+            params![r.digest],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n as u64)
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => BlobAccess::Missing,
+            _ => BlobAccess::Integrity,
+        })
+    }
+
+    /// Store-level slice: substr never materializes the blob
+    /// (A1 D-023's seek discipline, recovered). SQLite's substr is
+    /// 1-based; end is clamped by substr's length semantics.
+    fn get_range(&self, r: &BlobRef, offset: u64, len: u64) -> Result<Vec<u8>, BlobAccess> {
+        let conn = self.conn.lock().expect("blob store mutex poisoned");
+        let bytes: Vec<u8> = conn
+            .query_row(
+                "SELECT substr(bytes, ?2, ?3) FROM blobs WHERE digest=?1",
+                params![r.digest, offset + 1, len],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => BlobAccess::Missing,
+                _ => BlobAccess::Integrity,
+            })?;
+        Ok(bytes)
     }
 
     fn retain(&self, keep: &std::collections::HashSet<String>) -> usize {

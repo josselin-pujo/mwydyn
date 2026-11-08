@@ -125,7 +125,24 @@ impl<'a> Host<'a> {
     }
 
     pub fn blob_len(&self, r: &BlobRef) -> Result<u64, BlobAccess> {
-        self.blob_get(r).map(|b| b.len() as u64)
+        if !self.caps.iter().any(|row| row.holds("blob.read", "*")) {
+            return Err(BlobAccess::Unauthorized);
+        }
+        self.blobs.len(r)
+    }
+
+    /// Range read WITHOUT materializing the blob (round 28: the
+    /// provider seeks; no full fetch, no per-read verification).
+    pub fn blob_get_range(
+        &self,
+        r: &BlobRef,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, BlobAccess> {
+        if !self.caps.iter().any(|row| row.holds("blob.read", "*")) {
+            return Err(BlobAccess::Unauthorized);
+        }
+        self.blobs.get_range(r, offset, len)
     }
 
     /// THE GHOST GATE (§8.3, round 19): read any lineage's range —
