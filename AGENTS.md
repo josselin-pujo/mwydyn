@@ -31,6 +31,9 @@ all DECIDED. Owner's laws on record: clock obliviousness, "CBOR is
 just CBOR", no reply-to, atomicity-only-inside-clock-domains,
 refusal-minting-is-policy, compose-parity (native and WASM actors
 compose identically), faces-not-implementations (journal/blob),
+NON-DETERMINISTIC BUT RECORDED (round 21: the journal is law — races
+are real-time only, the recording is what happened; replay follows
+the journal; transitions run in parallel, commits serialize),
 TIGHT CORE (round 18: if the contract never reads it, the core never
 carries it — core deps = mwydyn-data only; mwydyn-schema is a peer
 crate, the runtime is registry-blind as well as schema-blind).

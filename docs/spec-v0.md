@@ -322,6 +322,24 @@ ceremony without payoff.
 
 ## 6. Execution [DECIDED choices / OPEN mechanisms]
 
+- **The execution model [DECIDED, round 21]**: CSP-shaped —
+  **transitions run in parallel** (different actors share nothing;
+  single-cursor means an actor never overlaps itself), **commits
+  serialize per context** (the journal's total order, §8).
+  Determinism is defined **relative to the journal**: races are
+  real-time only, the recording is law — *"non-deterministic but
+  recorded; the journal is law; whatever happens that creates the
+  stream of events that are journaled is what it is"* (owner).
+  Replay follows the journal and is deterministic given it. The
+  mechanism (post-M2 executor): workers run phase-1 transitions
+  concurrently; a committer lands them in DISPATCH order —
+  parallelism with deterministic commit order. The serial
+  `run_until_idle` pump stays forever as the deterministic mode
+  (tests, replay verification). Readiness bounds bought now:
+  `JournalFace: Send+Sync` (external providers are threaded — one
+  that cannot cross threads is not a real provider), `Actor: Send`
+  (no `Rc` in actor state, by contract), `ClockFace: Send+Sync`,
+  blob store `Mutex`.
 - Runtime: **wasmtime**. Budget knobs proven in A1's spike [A1:40]:
   epoch-interrupt wall clock, memory limiter, optional fuel.
 - Stateful actors choose:
