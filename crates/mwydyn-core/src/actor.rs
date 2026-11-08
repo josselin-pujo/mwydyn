@@ -140,7 +140,11 @@ pub struct MsgCtx {
     pub from: Address,
 }
 
-pub trait Actor {
+/// `Send` (round 21, multithread-readiness): actor state MOVES —
+/// between the scheduler and transition workers once the executor
+/// lands. This forbids `Rc`/non-Send state in actors *by contract*,
+/// early, while only toy actors exist to fix.
+pub trait Actor: Send {
     /// Boot configuration kick (the `init` export of the world).
     fn init(&mut self, _host: &Host, _spec: &[u8]) {}
 

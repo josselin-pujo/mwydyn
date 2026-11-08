@@ -31,11 +31,13 @@ pub enum BlobAccess {
 type Entry = (String, Vec<u8>, Option<u64>);
 
 pub struct RamBlobStore {
-    /// Interior mutability: puts are EAGER ambient calls during
-    /// receive (round 16 — allocation is not an effect), so the host
-    /// face holds `&self`. Single-threaded pump; M1/M2 revisit if
-    /// hosting ever goes multi-threaded.
-    entries: std::cell::RefCell<HashMap<String, Entry>>,
+    /// Interior mutability with a Mutex (round 21,
+    /// multithread-readiness): puts are EAGER ambient calls during
+    /// receive (round 16), so the host face holds `&self`; when
+    /// transitions move to workers, the store crosses threads. The
+    /// lock is held only for map operations — no user code runs
+    /// inside, so poisoning is practically unreachable.
+    entries: std::sync::Mutex<HashMap<String, Entry>>,
 }
 
 impl Default for RamBlobStore {
@@ -47,7 +49,7 @@ impl Default for RamBlobStore {
 impl RamBlobStore {
     pub fn new() -> RamBlobStore {
         RamBlobStore {
-            entries: std::cell::RefCell::new(HashMap::new()),
+            entries: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -68,14 +70,15 @@ impl RamBlobStore {
             size: bytes.len() as u64,
         };
         self.entries
-            .borrow_mut()
+            .lock()
+            .expect("blob store mutex poisoned")
             .insert(digest, (media_type.to_string(), bytes.to_vec(), ttl_micros));
         Ok(r)
     }
 
     /// Verify-on-read: (type, bytes) must hash to the ref's digest.
     pub fn get(&self, r: &BlobRef) -> Result<Vec<u8>, BlobAccess> {
-        let entries = self.entries.borrow();
+        let entries = self.entries.lock().expect("blob store mutex poisoned");
         let Some((ty, bytes, _)) = entries.get(&r.digest) else {
             return Err(BlobAccess::Missing);
         };
@@ -91,6 +94,6 @@ impl RamBlobStore {
     }
 
     pub fn count(&self) -> usize {
-        self.entries.borrow().len()
+        self.entries.lock().expect("blob store mutex poisoned").len()
     }
 }

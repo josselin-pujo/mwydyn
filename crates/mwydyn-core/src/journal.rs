@@ -82,7 +82,13 @@ pub enum JournalError {
 /// point; contiguous per-lineage sequence; append-only, no retention
 /// loss; ordered byte-identical replay; serialized writes per
 /// context (v0: single-writer).
-pub trait JournalFace {
+///
+/// `Send + Sync` (round 21, multithread-readiness): transitions will
+/// run on workers while commits serialize — the face must cross
+/// threads. External providers (NATS/Kafka clients) are threaded
+/// anyway; a provider that cannot cross threads is not a real
+/// provider.
+pub trait JournalFace: Send + Sync {
     fn commit(&mut self, context: &str, ops: Vec<JournalOp>) -> Result<Commit, JournalError>;
     /// Ordered replay of a lineage range, INCLUSIVE bounds, verified.
     /// Works on any lineage — live or ghost (§8.3).

@@ -45,10 +45,12 @@ pub enum Verdict {
 }
 
 /// Supervision + shape for one spawn (§3.2: policy attaches at
-/// spawn; escalation routes to the owner handle).
+/// spawn; escalation routes to the owner handle). The factory is
+/// `Send` with the actor (round 21): restarts may be requested from
+/// wherever the scheduler lives.
 pub struct Spawn {
     pub name: Option<String>,
-    pub factory: Box<dyn Fn() -> Box<dyn Actor>>,
+    pub factory: Box<dyn Fn() -> Box<dyn Actor> + Send>,
     pub supervision: Supervision,
     pub rows: Vec<CapRow>,
     pub mailbox_bound: usize,
@@ -56,7 +58,7 @@ pub struct Spawn {
 }
 
 impl Spawn {
-    pub fn new(name: Option<&str>, factory: Box<dyn Fn() -> Box<dyn Actor>>) -> Spawn {
+    pub fn new(name: Option<&str>, factory: Box<dyn Fn() -> Box<dyn Actor> + Send>) -> Spawn {
         Spawn {
             name: name.map(|s| s.to_string()),
             factory,
@@ -107,7 +109,8 @@ pub struct Handle {
 /// The clock face — injected, so the ONLY wall-clock reader is
 /// whatever sits behind it (§6: clock obliviousness for everyone
 /// else). Tests inject a manual clock; determinism is preserved.
-pub trait ClockFace {
+/// Send + Sync per the multithread-readiness bounds (round 21).
+pub trait ClockFace: Send + Sync {
     fn now_micros(&self) -> i64;
 }
 
@@ -169,7 +172,7 @@ struct Entry {
     /// `None` = terminal (fail-fast crash); pending mail drains to
     /// dead letters — fail-fast is loud, never silently holding.
     actor: Option<Box<dyn Actor>>,
-    factory: Box<dyn Fn() -> Box<dyn Actor>>,
+    factory: Box<dyn Fn() -> Box<dyn Actor> + Send>,
     supervision: Supervision,
     rows: Vec<CapRow>,
     mailbox: Mailbox,
@@ -579,7 +582,7 @@ impl Context {
     /// actor addressed by its handle — scale-to-zero by lifecycle.
     pub fn spawn_task(
         &mut self,
-        factory: Box<dyn Fn() -> Box<dyn Actor>>,
+        factory: Box<dyn Fn() -> Box<dyn Actor> + Send>,
         init_spec: &[u8],
     ) -> Result<Handle, SpawnError> {
         self.spawn(
@@ -595,7 +598,7 @@ impl Context {
     /// (Correlations minted here are reply-matching, §2.)
     pub fn call_task(
         &mut self,
-        factory: Box<dyn Fn() -> Box<dyn Actor>>,
+        factory: Box<dyn Fn() -> Box<dyn Actor> + Send>,
         mut request: Letter,
     ) -> Result<Option<Letter>, SpawnError> {
         self.counters += 1;
