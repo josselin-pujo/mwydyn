@@ -9,6 +9,7 @@
 
 pub mod decode;
 pub mod encode;
+pub mod envelope;
 
 pub use decode::decode;
 pub use encode::encode;
@@ -224,7 +225,7 @@ fn validate_media_type(media_type: &str) -> Result<(), ValueError> {
     Ok(())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
     h.update(bytes);
