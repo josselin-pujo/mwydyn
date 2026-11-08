@@ -480,6 +480,11 @@ with badly defined semantics.)
 
 - `InMemoryJournal` — the RAM tier and the tests, proving the face
   is not SQLite-shaped.
-- `SQLiteJournal` — M2's production impl: transactions give the
-  atomic batch natively; the batch record pattern is unnecessary
-  there (a DB transaction covers all rows).
+- `SQLiteJournal` — the durable impl, behind the `sqlite` cargo
+  feature (default ON): transactions give the atomic batch
+  natively; envelopes stored as canonical CBOR, verified on read.
+- **Placement law [round 25]**: distributed providers (NATS,
+  Kafka, consensus-backed) are PLUGGABLE CRATES OUTSIDE the core —
+  the face's `Send + Sync` bound and the §8.4 admission list are
+  the entire integration surface; their dependency waves (tokio,
+  TLS, client SDKs) never touch the core's graph.

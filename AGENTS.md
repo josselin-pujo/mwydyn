@@ -31,6 +31,10 @@ all DECIDED. Owner's laws on record: clock obliviousness, "CBOR is
 just CBOR", no reply-to, atomicity-only-inside-clock-domains,
 refusal-minting-is-policy, compose-parity (native and WASM actors
 compose identically), faces-not-implementations (journal/blob),
+DISTRIBUTED JOURNALS ARE PLUGGABLE CRATES, NEVER CORE (round 25:
+NATS/Kafka/consensus providers live outside the core's dependency
+graph — tokio/TLS/client-SDK waves must never touch it; SQLite is
+the owner-sanctioned in-core default feature),
 NON-DETERMINISTIC BUT RECORDED (round 21: the journal is law — races
 are real-time only, the recording is what happened; replay follows
 the journal; transitions run in parallel, commits serialize),
