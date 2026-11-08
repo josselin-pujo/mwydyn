@@ -3,7 +3,7 @@
 //! effects. Writing is declaring — there is no post/put/mint/emit
 //! import, only reads (§3.5).
 
-use crate::blob::{BlobAccess, BlobRef, RamBlobStore};
+use crate::blob::{BlobAccess, BlobRef};
 use crate::journal::JournalFace;
 use mwydyn_data::{Address, Envelope, Letter};
 
@@ -68,7 +68,7 @@ impl CapRow {
 /// the ticker's clock read + the GHOST gate (§8.3). Nothing here can
 /// have observable effects.
 pub struct Host<'a> {
-    blobs: &'a RamBlobStore,
+    blobs: &'a dyn crate::blob::BlobFace,
     journal: &'a dyn JournalFace,
     context: &'a str,
     caps: &'a [CapRow],
@@ -77,7 +77,7 @@ pub struct Host<'a> {
 
 impl<'a> Host<'a> {
     pub(crate) fn new(
-        blobs: &'a RamBlobStore,
+        blobs: &'a dyn crate::blob::BlobFace,
         journal: &'a dyn JournalFace,
         context: &'a str,
         caps: &'a [CapRow],

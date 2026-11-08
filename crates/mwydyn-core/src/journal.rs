@@ -126,6 +126,10 @@ pub trait JournalFace: Send + Sync {
     fn cursor(&self, context: &str, lineage: u64, actor: &str) -> Result<Option<u64>, JournalError>;
     fn active_lineage(&self, context: &str) -> Result<u64, JournalError>;
     fn lineages(&self, context: &str) -> Result<Vec<LineageInfo>, JournalError>;
+    /// A lineage's total covered range end — the highest seq it can
+    /// serve, counting the shared prefix delegated to ancestors.
+    /// Ghost reads and GC reachability scans both need this.
+    fn covered(&self, context: &str, lineage: u64) -> Result<u64, JournalError>;
     /// All letters addressed to `actor` with seq in `1..=up_to`, in
     /// seq order — delivered AND undelivered. THE HYDRATION READ
     /// (round 26): replay `1..=cursor` through a fresh instance with
@@ -431,6 +435,13 @@ impl JournalFace for InMemoryJournal {
                 active: (i + 1) as u64 == ctx.active,
             })
             .collect())
+    }
+
+    fn covered(&self, context: &str, lineage: u64) -> Result<u64, JournalError> {
+        let Some(ctx) = self.ctxs.get(context) else {
+            return Err(JournalError::UnknownContext);
+        };
+        Ok(ctx.next_seq(lineage).saturating_sub(1))
     }
 
     fn letters_for(

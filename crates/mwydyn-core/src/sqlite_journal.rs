@@ -98,7 +98,7 @@ impl SQLiteJournal {
     }
 }
 
-fn sql_err(e: rusqlite::Error) -> JournalError {
+pub(crate) fn sql_err(e: rusqlite::Error) -> JournalError {
     JournalError::Storage(format!("sqlite: {e}"))
 }
 
@@ -568,6 +568,11 @@ impl JournalFace for SQLiteJournal {
                 active: id == active,
             })
             .collect())
+    }
+
+    fn covered(&self, context: &str, lineage: u64) -> Result<u64, JournalError> {
+        let conn = self.conn.lock().expect("journal mutex poisoned");
+        covered(&conn, context, lineage)
     }
 }
 

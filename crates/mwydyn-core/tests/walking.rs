@@ -8,6 +8,8 @@ use mwydyn_core::{
 #[cfg(feature = "sqlite")]
 use mwydyn_core::SQLiteJournal;
 use mwydyn_data::{Address, DecodeOptions, Letter, Value};
+#[cfg(feature = "sqlite")]
+use mwydyn_core::SQLiteBlobStore;
 
 fn addr(context: &str, name: &str) -> Address {
     Address::Named {
@@ -945,4 +947,182 @@ fn rewind_forks_a_readable_ghost_branch_behind_the_gate() {
         none_ghosts, 2,
         "exactly the two GRANTED probes read the ghost (wide + per-lineage)"
     );
+}
+
+/// M3: eager put → journaled reference → GC keeps; eager put →
+/// NO journaled reference → GC collects (round 16's law, proven).
+#[test]
+fn gc_collects_unreferenced_allocations_and_keeps_journaled_ones() {
+    let mut ctx = Context::new("c1");
+    ctx.spawn(
+        Spawn::new(
+            Some("blob"),
+            Box::new(|| Box::new(BlobActor)),
+        )
+        .rows(vec![CapRow::new("blob.read", "*"), CapRow::new("blob.write", "*")]),
+    )
+    .unwrap();
+
+    // Two eager allocations, only ONE earns a journaled reference
+    // (a letter whose payload carries the tag-1002 ref).
+    let kept_digest = Value::blob_digest(b"referenced", "text/plain").unwrap();
+    let kept_ref = mwydyn_data::encode(&Value::BlobRef {
+        digest: kept_digest.clone(),
+        media_type: "text/plain".into(),
+        size: 10,
+    });
+    struct PublishTwo {
+        reader: Address,
+    }
+    impl Actor for PublishTwo {
+        fn receive(&mut self, _ctx: &MsgCtx, host: &Host, _letter: &Letter) -> Vec<Effect> {
+            let kept = host
+                .blob_put(b"referenced", "text/plain", None)
+                .expect("blob.write held");
+            let garbage = host
+                .blob_put(b"unreferenced", "text/plain", None)
+                .expect("blob.write held");
+            // Only `kept` is posted; `garbage` is a dropped allocation.
+            let payload = mwydyn_data::encode(&Value::BlobRef {
+                digest: kept.digest.clone(),
+                media_type: kept.media_type.clone(),
+                size: kept.size,
+            });
+            let _ = garbage;
+            vec![Effect::Post {
+                to: self.reader.clone(),
+                letter: Letter::new("test.ref@1", payload, None, None, vec![]).unwrap(),
+            }]
+        }
+    }
+    ctx.spawn(
+        Spawn::new(
+            Some("pub"),
+            Box::new(|| Box::new(PublishTwo {
+                reader: addr("c1", "blob"),
+            })),
+        )
+        .rows(vec![CapRow::new("blob.write", "*")]),
+    )
+    .unwrap();
+    let l = Letter::new("test.put@1", vec![], None, None, vec![]).unwrap();
+    ctx.post(&addr("c1", "pub"), l, vec![]);
+    ctx.run_until_idle(50);
+    assert_eq!(ctx.blob_count(), 2, "pre-GC: both allocations exist");
+
+    // GC sweeps: the referenced blob survives, the dropped one is
+    // collected.
+    let collected = ctx.gc().expect("gc");
+    assert_eq!(collected, 1, "exactly the unreferenced blob collected");
+    assert_eq!(ctx.blob_count(), 1);
+
+    // The survivor still verifies and reads — GC never breaks
+    // references (round 12's hash-bound law intact).
+    let l = Letter::new("test.read@1", kept_ref, None, None, vec![]).unwrap();
+    ctx.post(&addr("c1", "blob"), l, vec![]);
+    ctx.run_until_idle(50);
+    assert!(ctx.telemetry().iter().any(|(_, m)| m == "READ:referenced"));
+    assert!(!ctx.telemetry().iter().any(|(_, m)| m.contains("READ-ERR")));
+}
+
+#[test]
+#[cfg(feature = "sqlite")]
+fn durable_blobs_survive_reopen_and_gc_respects_ghost_reachability() {
+    // THE M3 durable story: eager puts are durable (SQLite blob
+    // store); a reopen + GC keeps journal-referenced blobs — across
+    // lineages: a blob referenced ONLY by a GHOST letter survives,
+    // because ghost branches are readable (round 19).
+    let dir = std::env::temp_dir();
+    let journal_path = dir.join(format!(
+        "mwydyn-m3j-{}-{:?}.sqlite",
+        std::process::id(),
+        line!()
+    ));
+    let blob_path = dir.join(format!(
+        "mwydyn-m3b-{}-{:?}.sqlite",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_file(&journal_path);
+    let _ = std::fs::remove_file(&blob_path);
+
+    struct GhostNote;
+    impl Actor for GhostNote {
+        fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, _letter: &Letter) -> Vec<Effect> {
+            vec![] // receives letters; contributes journal entries only
+        }
+    }
+    struct GhostPutter {
+        reader: Address,
+    }
+    impl Actor for GhostPutter {
+        fn receive(&mut self, _ctx: &MsgCtx, host: &Host, letter: &Letter) -> Vec<Effect> {
+            if letter.kind != "test.put@1" {
+                return vec![];
+            }
+            let r = host
+                .blob_put(b"ghost-only", "text/plain", None)
+                .expect("blob.write held");
+            let payload = mwydyn_data::encode(&Value::BlobRef {
+                digest: r.digest.clone(),
+                media_type: r.media_type.clone(),
+                size: r.size,
+            });
+            vec![Effect::Post {
+                to: self.reader.clone(),
+                letter: Letter::new("test.ghostref@1", payload, None, None, vec![]).unwrap(),
+            }]
+        }
+    }
+
+    // ctx1: the ghost-ref letter is committed on lineage 1 — then
+    // a rewind to 1 ORPHANS it (it becomes a ghost letter).
+    {
+        let mut ctx = Context::with_stores(
+            "c1",
+            Box::new(SQLiteJournal::open(&journal_path, Box::new(ManualClock(0))).unwrap()),
+            Box::new(SQLiteBlobStore::open(&blob_path).expect("blob store opens")),
+        );
+        ctx.spawn(Spawn::new(
+            Some("note"),
+            Box::new(|| Box::new(GhostNote)),
+        ))
+        .unwrap();
+        ctx.spawn(
+            Spawn::new(
+                Some("gp"),
+                Box::new(|| Box::new(GhostPutter {
+                    reader: addr("c1", "note"),
+                })),
+            )
+            .rows(vec![CapRow::new("blob.write", "*")]),
+        )
+        .unwrap();
+        let l = Letter::new("test.put@1", vec![], None, None, vec![]).unwrap();
+        ctx.post(&addr("c1", "gp"), l, vec![]);
+        ctx.run_until_idle(50);
+        ctx.rewind(1).expect("rewind orphans the ghost-ref letter");
+    }
+
+    // Reopen: hydrate, sweep — the ghost-referenced blob SURVIVES
+    // (ghost branches are readable, round 19), even though its
+    // letter no longer creates effects.
+    let mut ctx2 = Context::with_stores(
+        "c1",
+        Box::new(SQLiteJournal::open(&journal_path, Box::new(ManualClock(0))).unwrap()),
+        Box::new(SQLiteBlobStore::open(&blob_path).expect("blob store opens")),
+    );
+    ctx2.spawn(Spawn::new(
+        Some("note"),
+        Box::new(|| Box::new(GhostNote)),
+    ))
+    .unwrap();
+    ctx2.hydrate().expect("hydrate");
+    let collected = ctx2.gc().expect("gc");
+    assert_eq!(collected, 0, "the ghost-referenced blob is reachable");
+    assert_eq!(ctx2.blob_count(), 1);
+    let _ = std::fs::remove_file(&journal_path);
+    let _ = std::fs::remove_file(&blob_path);
+    let _ = std::fs::remove_file(journal_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(journal_path.with_extension("sqlite-shm"));
 }

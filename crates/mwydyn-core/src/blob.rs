@@ -97,3 +97,80 @@ impl RamBlobStore {
         self.entries.lock().expect("blob store mutex poisoned").len()
     }
 }
+
+/// The blob face (§4): content-addressed allocation + verified reads.
+/// Providers: RamBlobStore (RAM tier, tests) and SQLiteBlobStore
+/// (durable, `sqlite` feature) — the substrate-independence pattern
+/// from the journal (§8.5) applied to blobs.
+pub trait BlobFace: Send + Sync {
+    fn put(
+        &self,
+        bytes: &[u8],
+        media_type: &str,
+        ttl_micros: Option<u64>,
+    ) -> Result<BlobRef, &'static str>;
+    fn get(&self, r: &BlobRef) -> Result<Vec<u8>, BlobAccess>;
+    fn len(&self, r: &BlobRef) -> Result<u64, BlobAccess>;
+    /// Reference-aware collection (round 16's law, mechanized):
+    /// remove every blob whose digest is NOT in `keep`. Reachability
+    /// = digests referenced by any journaled entry on any lineage
+    /// (active or ghost — ghost reads must keep working, round 19)
+    /// and, eventually, by durable actor state (§7.6). Returns the
+    /// number of entries collected.
+    fn retain(&self, keep: &std::collections::HashSet<String>) -> usize;
+    fn count(&self) -> usize;
+}
+
+/// Boxed faces pass through — the context stores the provider boxed.
+impl BlobFace for Box<dyn BlobFace> {
+    fn put(
+        &self,
+        bytes: &[u8],
+        media_type: &str,
+        ttl_micros: Option<u64>,
+    ) -> Result<BlobRef, &'static str> {
+        (**self).put(bytes, media_type, ttl_micros)
+    }
+    fn get(&self, r: &BlobRef) -> Result<Vec<u8>, BlobAccess> {
+        (**self).get(r)
+    }
+    fn len(&self, r: &BlobRef) -> Result<u64, BlobAccess> {
+        (**self).len(r)
+    }
+    fn retain(&self, keep: &std::collections::HashSet<String>) -> usize {
+        (**self).retain(keep)
+    }
+    fn count(&self) -> usize {
+        (**self).count()
+    }
+}
+
+impl BlobFace for RamBlobStore {
+    fn put(
+        &self,
+        bytes: &[u8],
+        media_type: &str,
+        ttl_micros: Option<u64>,
+    ) -> Result<BlobRef, &'static str> {
+        RamBlobStore::put(self, bytes, media_type, ttl_micros)
+    }
+
+    fn get(&self, r: &BlobRef) -> Result<Vec<u8>, BlobAccess> {
+        RamBlobStore::get(self, r)
+    }
+
+    fn len(&self, r: &BlobRef) -> Result<u64, BlobAccess> {
+        RamBlobStore::len(self, r).ok_or(BlobAccess::Missing)
+    }
+
+    fn retain(&self, keep: &std::collections::HashSet<String>) -> usize {
+        let mut entries = self.entries.lock().expect("blob store mutex poisoned");
+        let before = entries.len();
+        entries.retain(|digest, _| keep.contains(digest));
+        before - entries.len()
+    }
+
+    fn count(&self) -> usize {
+        RamBlobStore::count(self)
+    }
+}

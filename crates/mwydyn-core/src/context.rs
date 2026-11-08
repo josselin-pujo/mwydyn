@@ -13,7 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use mwydyn_data::{Address, Envelope, Letter};
 
 use crate::actor::{Actor, CapRow, Effect, Host, Level, MsgCtx};
-use crate::blob::RamBlobStore;
+use crate::blob::{BlobFace, RamBlobStore};
 use crate::journal::{InMemoryJournal, JournalError, JournalFace, JournalOp, Pending};
 use crate::ticker::Ticker;
 
@@ -174,7 +174,7 @@ pub struct Context {
     entries: Vec<Entry>,
     by_name: HashMap<String, usize>,
     by_id: HashMap<String, usize>,
-    blobs: RamBlobStore,
+    blobs: Box<dyn BlobFace>,
     journal: Box<dyn JournalFace>,
     /// Replies to `external` land here — the embedding's drainable
     /// inbox (§3.4: the embedding's handle). The letters are ALSO
@@ -208,14 +208,25 @@ impl Context {
 
     /// The journal face is injected — the durability tier IS the
     /// face choice (§8.5: InMemory for RAM tier, SQLite for log
-    /// tier, external providers later).
+    /// tier, external providers later). Blobs stay on the RAM store
+    /// by default; see `with_stores` for the durable combo.
     pub fn with_journal(name: impl Into<String>, journal: Box<dyn JournalFace>) -> Context {
+        Context::with_stores(name, journal, Box::new(RamBlobStore::new()))
+    }
+
+    /// The durable combo: journal face + blob face injected. For the
+    /// durable tier both point at SQLite-backed providers.
+    pub fn with_stores(
+        name: impl Into<String>,
+        journal: Box<dyn JournalFace>,
+        blobs: Box<dyn BlobFace>,
+    ) -> Context {
         let mut ctx = Context {
             name: name.into(),
             entries: Vec::new(),
             by_name: HashMap::new(),
             by_id: HashMap::new(),
-            blobs: RamBlobStore::new(),
+            blobs,
             journal,
             external_outbox: VecDeque::new(),
             telemetry: Vec::new(),
@@ -256,10 +267,42 @@ impl Context {
         self.external_outbox.drain(..).collect()
     }
 
-    /// Blob-store size — diagnostics/garbage observation only. Reach-
-    /// ability (what GC may collect) is a watermark question, M3.
+    /// Blob-store size — diagnostics/garbage observation only.
     pub fn blob_count(&self) -> usize {
         self.blobs.count()
+    }
+
+    /// Reference-aware GC (§4, round 16 mechanized): reachability =
+    /// digests referenced by ANY journaled entry on ANY lineage
+    /// (active or ghost — ghost reads must keep working, round 19).
+    /// Everything else is round-16 garbage: eager allocations that
+    /// never earned a journaled reference. Durable actor state will
+    /// join the reachability set when §7.6 snapshots land.
+    ///
+    /// Payload scanning is a GC-sweep concern, not a hot-path one:
+    /// blob refs are DATA-MODEL primitives (tag 1002), so this walk
+    /// does not violate the schema-blind core law (round 10).
+    pub fn gc(&mut self) -> Result<usize, JournalError> {
+        let mut referenced = std::collections::HashSet::new();
+        for lin in self.journal.lineages(&self.name)? {
+            let upto = self.journal.covered(&self.name, lin.id)?;
+            if upto == 0 {
+                continue;
+            }
+            for env in self.journal.read(&self.name, lin.id, 1, upto)? {
+                // The envelope's canonical form wraps the payload as
+                // opaque bytes; the payload ITSELF is canonical CBOR
+                // carrying the tag-1002 refs.
+                if let Ok(v) =
+                    mwydyn_data::decode(&env.letter.payload, &mwydyn_data::DecodeOptions::default())
+                {
+                    let mut refs = Vec::new();
+                    mwydyn_data::collect_blob_refs(&v, &mut refs, 0);
+                    referenced.extend(refs);
+                }
+            }
+        }
+        Ok(self.blobs.retain(&referenced))
     }
 
     /// Spawn an actor. Naming is opt-in (§3.4): named = addressable,

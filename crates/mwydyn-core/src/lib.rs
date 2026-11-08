@@ -13,11 +13,15 @@ pub mod blob;
 pub mod context;
 pub mod journal;
 #[cfg(feature = "sqlite")]
+pub mod sqlite_blob;
+#[cfg(feature = "sqlite")]
 pub mod sqlite_journal;
 pub mod ticker;
 
 pub use actor::{Actor, CapRow, Effect, Host, Level, MsgCtx};
-pub use blob::{BlobAccess, BlobRef, RamBlobStore};
+pub use blob::{BlobAccess, BlobFace, BlobRef, RamBlobStore};
+#[cfg(feature = "sqlite")]
+pub use sqlite_blob::SQLiteBlobStore;
 pub use context::{
     ClockFace, Context, Handle, ManualClock, PumpStats, RefuseReason, Spawn, SpawnError,
     Supervision, Verdict, WallClock,

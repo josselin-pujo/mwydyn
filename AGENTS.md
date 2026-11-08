@@ -58,7 +58,13 @@ serializer, not a validator (forged refs must be encodable for
 rejection vectors). Toolchain rustc 1.99.1. **Envelope + letter
 landed** ([envelope.rs](crates/mwydyn-data/src/envelope.rs) — byzantine
 posture as types, kind syntax pinned, canonical form + checksum;
-unit tests green). **`mwydyn-core` RUNS** (work-notes/15): native
+unit tests green). **M3 CLOSED** (work-notes/27): `BlobFace` (put/get/len/retain/count,
+Send+Sync, boxed passthrough) + RamBlobStore + SQLiteBlobStore
+(`sqlite` feature, verify-on-read); `Context::gc()` — reachability =
+tag-1002 digests across EVERY lineage (active AND ghost: ghosts are
+readable, so ghost-referenced blobs survive GC); payload scanning is
+data-model work (tag 1002), not schema — round 10 intact, sweep-only;
+`Context::with_stores` = the durable combo constructor. **`mwydyn-core` RUNS** (work-notes/15): native
 actors over `receive(ctx, host, letter) → effects` (MsgCtx = runtime-
 minted from, read-only); four-phase effects engine (transition →
 validate-all → classify → journal-commit); **the mailbox IS a cursor

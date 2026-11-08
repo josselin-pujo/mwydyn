@@ -98,6 +98,31 @@ impl Value {
     }
 }
 
+/// Collect the digests of every blob reference in a data-model value,
+/// recursively (tag 1002). This is DATA-MODEL work, not schema work —
+/// blob refs are first-class primitives (§1), so the GC may walk
+/// payloads for them without violating the schema-blind core law
+/// (round 10). Depth-limited like the decoder.
+pub fn collect_blob_refs(v: &Value, out: &mut Vec<String>, depth: usize) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    match v {
+        Value::BlobRef { digest, .. } => out.push(digest.clone()),
+        Value::Array(items) => {
+            for item in items {
+                collect_blob_refs(item, out, depth + 1);
+            }
+        }
+        Value::Map(pairs) => {
+            for (_, val) in pairs {
+                collect_blob_refs(val, out, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodeError {
     Empty,
