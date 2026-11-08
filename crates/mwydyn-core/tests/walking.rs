@@ -6,7 +6,6 @@ use mwydyn_core::{
     Supervision, Verdict,
 };
 use mwydyn_data::{Address, DecodeOptions, Letter, Value};
-use mwydyn_schema::SchemaDef;
 
 fn addr(context: &str, name: &str) -> Address {
     Address::Named {
@@ -599,21 +598,4 @@ fn call_task_is_a_one_call_round_trip() {
     assert!(corr.starts_with("call-"));
     // Outbox drained of the matched reply; nothing else was pending.
     assert!(ctx.drain_external().is_empty());
-}
-
-#[test]
-fn context_registry_ships_core_schemas_and_composes() {
-    let mut ctx = Context::new("c1");
-    for id in ["mwydyn.timer.arm@1", "mwydyn.timer.tick@1", "mwydyn.timer.poll@1"] {
-        assert!(
-            ctx.registry().lookup(id).is_some(),
-            "{id} ships with the runtime (§7.9)"
-        );
-    }
-    // Embeddings compose theirs at composition time; conflicts refuse.
-    ctx.claim_schema(SchemaDef::new("acme.thing@1", "thing = { x: int }"))
-        .unwrap();
-    assert!(ctx.registry().lookup("acme.thing@1").is_some());
-    let conflict = ctx.claim_schema(SchemaDef::new("acme.thing@1", "thing = { y: int }"));
-    assert!(conflict.is_err(), "same id, different definition — refuse");
 }

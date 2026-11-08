@@ -7,7 +7,6 @@
 use std::collections::{HashMap, VecDeque};
 
 use mwydyn_data::{Address, Envelope, Letter};
-use mwydyn_schema::{Registry, SchemaDef};
 
 use crate::actor::{Actor, CapRow, Effect, Host, Level, MsgCtx};
 use crate::blob::RamBlobStore;
@@ -182,11 +181,6 @@ pub struct Context {
     by_name: HashMap<String, usize>,
     by_id: HashMap<String, usize>,
     blobs: RamBlobStore,
-    /// The runtime's schema registry — seeded with the core schemas,
-    /// composed by embeddings. NEVER consulted by admission (§7.9:
-    /// the core is schema-blind); it exists for embeddings and
-    /// external tooling (typed views, compatibility checks).
-    registry: Registry,
     /// Replies to `external` land here — the embedding's drainable
     /// inbox (§3.4: the embedding's handle).
     external_outbox: VecDeque<Envelope>,
@@ -212,7 +206,6 @@ impl Context {
             by_name: HashMap::new(),
             by_id: HashMap::new(),
             blobs: RamBlobStore::new(),
-            registry: Registry::with(mwydyn_schema::core_schemas()),
             external_outbox: VecDeque::new(),
             telemetry: Vec::new(),
             dead_letters: Vec::new(),
@@ -242,19 +235,6 @@ impl Context {
 
     pub fn dead_letters(&self) -> &[Envelope] {
         &self.dead_letters
-    }
-
-    /// The context's schema registry — core schemas pre-claimed;
-    /// embeddings compose theirs via [`Registry::compose`]. The core
-    /// never consults it (schema-blind, §7.9).
-    pub fn registry(&self) -> &Registry {
-        &self.registry
-    }
-
-    /// Claim a schema into the context's registry (composition-time
-    /// operation; conflicts refuse, identical digests are idempotent).
-    pub fn claim_schema(&mut self, def: SchemaDef) -> Result<String, mwydyn_schema::SchemaError> {
-        self.registry.claim(def)
     }
 
     /// Drain the external outbox — the embedding's replies (§3.4:

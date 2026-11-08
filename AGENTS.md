@@ -30,7 +30,10 @@ Rounds done: charter (00) through schema registry (10) — spec §1–§6
 all DECIDED. Owner's laws on record: clock obliviousness, "CBOR is
 just CBOR", no reply-to, atomicity-only-inside-clock-domains,
 refusal-minting-is-policy, compose-parity (native and WASM actors
-compose identically), faces-not-implementations (journal/blob).
+compose identically), faces-not-implementations (journal/blob),
+TIGHT CORE (round 18: if the contract never reads it, the core never
+carries it — core deps = mwydyn-data only; mwydyn-schema is a peer
+crate, the runtime is registry-blind as well as schema-blind).
 **Implementation: M0 OPEN** (plan ACTIVE in [docs/plan.md](docs/plan.md)):
 workspace live; `mwydyn-data` canonical CBOR profile **v0.1** built
 (tag 1002 blob refs, hash-bound mediaTypes — round 12: content
@@ -60,6 +63,9 @@ refusal, digest-pinned projections; core schemas
 carried verbatim, validation-by-CDDL is M1+). **The external outbox
 landed** — posts to `Instance("external")` drain via
 `drain_external()` (the embedding's handle, §3.4); `spawn_task` +
-`call_task` are the task pattern as verbs. **Next:** M2 — the
-journal face (cursor leaves memory, contiguous seq, journaled
-ticks, rewind behind a FACE: SQLite first, distributed later).
+`call_task` are the task pattern as verbs. **Round 18: the registry
+LEFT the runtime** — mwydyn-schema is a peer crate; core deps =
+mwydyn-data only; embeddings compose Registries themselves.
+**Next:** M2 — the journal face (cursor leaves memory, contiguous
+seq, journaled ticks, rewind behind a FACE: SQLite first,
+distributed later).

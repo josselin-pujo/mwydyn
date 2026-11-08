@@ -5,4 +5,3 @@ edition.workspace = true
 
 [dependencies]
 mwydyn-data = { path = "../mwydyn-data" }
-mwydyn-schema = { path = "../mwydyn-schema" }
