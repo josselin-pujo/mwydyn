@@ -34,6 +34,12 @@ compose identically), faces-not-implementations (journal/blob),
 NON-DETERMINISTIC BUT RECORDED (round 21: the journal is law — races
 are real-time only, the recording is what happened; replay follows
 the journal; transitions run in parallel, commits serialize),
+APACHE-2.0 + LICENSE ADMISSION LIST (round 24: pure Apache-2.0
+project license; linked copyleft GPL/AGPL/LGPL/SSPL refused —
+external services don't propagate, only linked crates; every new
+dependency passes `cargo deny check licenses`, policy in deny.toml,
+snapshots in sbom/; prefer aws-lc-rs over ring when QUIC lands;
+JSC's linked-LGPL is the named reason to keep JS on WASM/QuickJS-ng),
 TIGHT CORE (round 18: if the contract never reads it, the core never
 carries it — core deps = mwydyn-data only; mwydyn-schema is a peer
 crate, the runtime is registry-blind as well as schema-blind).
