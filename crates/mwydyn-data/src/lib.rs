@@ -64,6 +64,40 @@ pub enum ValueError {
     BadBlobRef(&'static str),
 }
 
+impl Value {
+    pub fn as_text(&self) -> Option<&str> {
+        if let Value::Text(s) = self {
+            Some(s)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_int(&self) -> Option<i64> {
+        if let Value::Int(i) = self {
+            Some(*i)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        if let Value::Bytes(b) = self {
+            Some(b)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_timestamp(&self) -> Option<i64> {
+        if let Value::Timestamp(m) = self {
+            Some(*m)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodeError {
     Empty,

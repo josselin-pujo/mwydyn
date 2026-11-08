@@ -3,5 +3,12 @@ name = "mwydyn-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["sqlite"]
+# The SQLite journal provider (§8.5). Default ON — the owner uses
+# SQLite everywhere as a file format and persistence system.
+sqlite = ["dep:rusqlite"]
+
 [dependencies]
 mwydyn-data = { path = "../mwydyn-data" }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }

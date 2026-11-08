@@ -63,6 +63,9 @@ pub enum EnvelopeError {
     BadKind(String),
     EmptyReference,
     EmptyProducer,
+    /// Canonical-form decoding failure (the SQLite provider stores
+    /// envelopes as their canonical CBOR; this is the inverse path).
+    BadForm(&'static str),
 }
 
 impl Letter {
@@ -182,6 +185,89 @@ impl Envelope {
     /// commit; recomputing it over a copy verifies the bytes.
     pub fn checksum(&self) -> String {
         sha256_hex(&crate::encode(&self.to_value()))
+    }
+
+    /// The inverse of [`Envelope::to_value`] — the storage path of
+    /// the SQLite provider (round 22/23: envelopes stored as their
+    /// canonical CBOR). Shape-validated on the way in; the checksum
+    /// is NOT restored — the journal recomputes and verifies.
+    pub fn from_value(v: &Value) -> Result<Envelope, EnvelopeError> {
+        const E: EnvelopeError = EnvelopeError::BadForm("malformed canonical envelope");
+        fn field<'a>(pairs: &'a [(String, Value)], name: &str) -> Option<&'a Value> {
+            pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+        }
+        fn text<'a>(pairs: &'a [(String, Value)], name: &str) -> Result<&'a str, EnvelopeError> {
+            field(pairs, name).and_then(Value::as_text).ok_or(E)
+        }
+        fn opt_text(
+            pairs: &[(String, Value)],
+            name: &str,
+        ) -> Result<Option<String>, EnvelopeError> {
+            match field(pairs, name) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::Text(s)) => Ok(Some(s.clone())),
+                _ => Err(E),
+            }
+        }
+        fn addr(v: &Value) -> Option<Address> {
+            match v {
+                Value::Text(s) => Some(Address::Instance(s.clone())),
+                // canonical key order: "name"(4) < "context"(7)
+                Value::Map(p) if p.len() == 2 && p[0].0 == "name" && p[1].0 == "context" => {
+                    Some(Address::Named {
+                        name: p[0].1.as_text()?.to_string(),
+                        context: p[1].1.as_text()?.to_string(),
+                    })
+                }
+                _ => None,
+            }
+        }
+        let Value::Map(pairs) = v else {
+            return Err(E);
+        };
+
+        let kind = text(pairs, "kind")?.to_string();
+        let Value::Bytes(payload) = field(pairs, "payload").ok_or(E)? else {
+            return Err(E);
+        };
+        let payload = payload.clone();
+        let cause = opt_text(pairs, "cause")?;
+        let correlation = opt_text(pairs, "correlation")?;
+        let Value::Array(authority_items) = field(pairs, "authority").ok_or(E)? else {
+            return Err(E);
+        };
+        let mut authority = Vec::new();
+        for item in authority_items {
+            authority.push(item.as_text().ok_or(E)?.to_string());
+        }
+        let seq = field(pairs, "seq")
+            .and_then(Value::as_int)
+            .filter(|n| *n >= 0)
+            .ok_or(E)? as u64;
+        let from = addr(field(pairs, "from").ok_or(E)?).ok_or(E)?;
+        let to = addr(field(pairs, "to").ok_or(E)?).ok_or(E)?;
+        let commit_ts = match field(pairs, "commitTs") {
+            Some(Value::Timestamp(m)) => Some(*m),
+            Some(Value::Null) | None => None,
+            _ => return Err(E),
+        };
+        let producer = text(pairs, "producer")?.to_string();
+        let letter = Letter {
+            kind,
+            payload,
+            cause,
+            correlation,
+            authority,
+        };
+        letter.validate()?;
+        Ok(Envelope {
+            letter,
+            seq,
+            from,
+            to,
+            commit_ts,
+            producer,
+        })
     }
 }
 

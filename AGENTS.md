@@ -69,9 +69,14 @@ refusal, digest-pinned projections; core schemas
 carried verbatim, validation-by-CDDL is M1+). **The external outbox
 landed** — posts to `Instance("external")` drain via
 `drain_external()` (the embedding's handle, §3.4); `spawn_task` +
-`call_task` are the task pattern as verbs. **Round 18: the registry
-LEFT the runtime** — mwydyn-schema is a peer crate; core deps =
-mwydyn-data only; embeddings compose Registries themselves.
-**Next:** M2 — the journal face (cursor leaves memory, contiguous
-seq, journaled ticks, rewind behind a FACE: SQLite first,
-distributed later).
+`call_task` are the task pattern as verbs. **M2: journal face +
+TWO providers** (work-notes/20–23): `JournalFace` (§8 as a trait,
+Send+Sync) with InMemory + SQLiteJournal (`sqlite` cargo feature,
+DEFAULT ON — bundled rusqlite; WAL + synchronous=FULL = the
+durability point; entries as canonical CBOR, verify-on-read; forks
+delegate shared prefixes to parents — no copying). **Face tests are
+PARAMETERIZED over providers** (journal_face.rs) — the substrate
+independence proof. Ghost gate: `Host::ghost_read` behind
+`ghost.read` caps, three-way tested. **Next:** hydration (rebuild
+rows/schedules from journal) + durable-context walking test closes
+M2; then the executor (round 21) becomes buildable.

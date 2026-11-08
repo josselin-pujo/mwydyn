@@ -80,6 +80,11 @@ pub enum JournalError {
     /// silent gap).
     BeyondHistory,
     BadRequest(&'static str),
+    /// A provider-side storage failure (SQL, IO, poisoning).
+    Storage(String),
+    /// Stored bytes no longer verify — bit rot, tampering, or a
+    /// broken provider (§8.4: loud, never silent divergence).
+    Integrity(&'static str),
 }
 
 /// The face (§8). Providers MUST: atomic batch commit at a durable
