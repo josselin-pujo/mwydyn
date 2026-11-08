@@ -5,6 +5,8 @@ use mwydyn_core::{
     Actor, CapRow, Context, Effect, Host, Level, ManualClock, MsgCtx, RefuseReason, Spawn,
     Supervision, Verdict,
 };
+#[cfg(feature = "sqlite")]
+use mwydyn_core::SQLiteJournal;
 use mwydyn_data::{Address, DecodeOptions, Letter, Value};
 
 fn addr(context: &str, name: &str) -> Address {
@@ -548,7 +550,7 @@ fn mint_requires_the_source_row() {
     }
     let mut ctx = Context::new("c1");
     ctx.spawn(
-        Spawn::new(Some("mint"), Box::new(|| Box::new(Minter)))
+        Spawn::new(Some("mint"), Box::new(|| Box::new(HydrationMinter)))
             .supervision(Supervision::Restart)
             .rows(vec![CapRow::new("role.write", "obj1")]),
     )
@@ -600,6 +602,155 @@ fn call_task_is_a_one_call_round_trip() {
     assert!(ctx.drain_external().is_empty());
 }
 
+#[test]
+#[cfg(feature = "sqlite")]
+fn hydration_rebuilds_rows_and_ticker_schedules() {
+    // THE crash-recovery story: a durable context dies mid-flight;
+    // the same composition is re-spawned on the reopened journal and
+    // hydrate() reconstructs grant sets (Mint facts) and the
+    // ticker's schedule (replayed arms) — then life continues.
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!(
+        "mwydyn-hydration-{}-{:?}.sqlite",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let build = |path: &std::path::Path, clock_us: i64| {
+        let mut ctx = Context::with_journal(
+            "c1",
+            Box::new(
+                SQLiteJournal::open(path, Box::new(ManualClock(1000)))
+                    .expect("journal opens"),
+            ),
+        );
+        ctx.set_clock(Box::new(ManualClock(clock_us)));
+        ctx
+    };
+
+    // ---- ctx1: mint a row, arm a timer at T=1000 (fires at 1500).
+    let mut ctx1 = build(&path, 1000);
+    ctx1.spawn(
+        Spawn::new(Some("mint"), Box::new(|| Box::new(HydrationMinter)))
+            .supervision(Supervision::Restart)
+            .rows(vec![CapRow::new("role.write", "obj1")]),
+    )
+    .unwrap();
+    ctx1.spawn(
+        Spawn::new(
+            Some("armer"),
+            Box::new(|| Box::new(Armer {
+                ticker: addr("c1", "ticker"),
+            })),
+        )
+        .supervision(Supervision::Restart),
+    )
+    .unwrap();
+    let mint = Letter::new("test.mint@1", vec![], None, None, vec![]).unwrap();
+    ctx1.post(&addr("c1", "mint"), mint, vec![]);
+    let go = Letter::new("test.go@1", vec![], None, None, vec![]).unwrap();
+    ctx1.post(&addr("c1", "armer"), go, vec![]);
+    ctx1.run_until_idle(50);
+    drop(ctx1);
+
+    // ---- ctx2: reopen, re-spawn the same composition, hydrate.
+    let mut ctx2 = build(&path, 1000);
+    ctx2.spawn(
+        Spawn::new(Some("mint"), Box::new(|| Box::new(HydrationMinter)))
+            .supervision(Supervision::Restart)
+            .rows(vec![CapRow::new("role.write", "obj1")]),
+    )
+    .unwrap();
+    ctx2.spawn(
+        Spawn::new(
+            Some("armer"),
+            Box::new(|| Box::new(Armer {
+                ticker: addr("c1", "ticker"),
+            })),
+        )
+        .supervision(Supervision::Restart),
+    )
+    .unwrap();
+    let replays = ctx2.hydrate().expect("hydrate");
+    assert!(replays >= 3, "ticker + minter + armer replays: {replays}");
+
+    // The mint fact hydrated into the grant set (base row + mint).
+    let caps = Letter::new("test.caps@1", vec![], None, None, vec![]).unwrap();
+    ctx2.post(&addr("c1", "mint"), caps, vec![]);
+    ctx2.run_until_idle(50);
+    assert!(ctx2
+        .telemetry()
+        .iter()
+        .any(|(_, m)| m == "CAPS:role.write,role.read"));
+
+    // Time moves past the armed deadline; the HYDRATED schedule
+    // fires: poll → tick → armer emits.
+    ctx2.set_clock(Box::new(ManualClock(1600)));
+    ctx2.run_until_idle(50);
+    assert!(ctx2.telemetry().iter().any(|(_, m)| m == "TICK:c9"));
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
+
+#[test]
+#[cfg(feature = "sqlite")]
+fn durable_context_survives_reopen() {
+    // THE M2 close-out: work, die, reopen, keep working. Letters
+    // committed in the old process are still pending in the new one;
+    // hydration replays the delivered prefix; nothing is lost or
+    // duplicated.
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!(
+        "mwydyn-durable-{}-{:?}.sqlite",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let mut ctx1 = Context::with_journal(
+        "c1",
+        Box::new(SQLiteJournal::open(&path, Box::new(ManualClock(0))).unwrap()),
+    );
+    ctx1.spawn(Spawn::new(Some("echo"), Box::new(|| Box::new(Echo))))
+        .unwrap();
+    let m1 = Letter::new("test.d@1", b"m1".to_vec(), None, Some("r1".into()), vec![]).unwrap();
+    ctx1.post(&addr("c1", "echo"), m1, vec![]);
+    ctx1.run_until_idle(50); // m1 delivered + replied (reply lost with ctx1's outbox view)
+    let m2 = Letter::new("test.d@1", b"m2".to_vec(), None, Some("r2".into()), vec![]).unwrap();
+    ctx1.post(&addr("c1", "echo"), m2, vec![]);
+    // m2 stays PENDING — never delivered. ctx1 dies here.
+    drop(ctx1);
+
+    let mut ctx2 = Context::with_journal(
+        "c1",
+        Box::new(SQLiteJournal::open(&path, Box::new(ManualClock(0))).unwrap()),
+    );
+    ctx2.spawn(Spawn::new(Some("echo"), Box::new(|| Box::new(Echo))))
+        .unwrap();
+    ctx2.hydrate().expect("hydrate");
+
+    // m2 is still pending — exactly-once delivery from the journal.
+    let m3 = Letter::new("test.d@1", b"m3".to_vec(), None, Some("r3".into()), vec![]).unwrap();
+    ctx2.post(&addr("c1", "echo"), m3, vec![]);
+    ctx2.run_until_idle(50);
+    let replies = ctx2.drain_external();
+    let mut payloads: Vec<Vec<u8>> = replies
+        .iter()
+        .map(|e| e.letter.payload.clone())
+        .collect();
+    payloads.sort();
+    assert_eq!(payloads, vec![b"m2".to_vec(), b"m3".to_vec()]);
+    assert!(
+        !payloads.contains(&b"m1".to_vec()),
+        "m1 was already delivered in ctx1 — no double delivery"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+}
+
 struct GhostProbe;
 
 impl Actor for GhostProbe {
@@ -644,6 +795,31 @@ fn probe_payload(lineage: u64, from: u64, to: u64) -> Vec<u8> {
         ])
         .expect("fixed keys"),
     )
+}
+
+/// Mints on request; lists its live rows on demand — the hydration
+/// probe for grant-set reconstruction.
+struct HydrationMinter;
+
+impl Actor for HydrationMinter {
+    fn receive(&mut self, _ctx: &MsgCtx, host: &Host, letter: &Letter) -> Vec<Effect> {
+        match letter.kind.as_str() {
+            "test.mint@1" => vec![Effect::Mint {
+                source_verb: "role.write".into(),
+                source_object: "obj1".into(),
+                verb: "role.read".into(),
+                object: "obj1".into(),
+            }],
+            "test.caps@1" => {
+                let names: Vec<String> = host.caps().iter().map(|r| r.verb.clone()).collect();
+                vec![Effect::Emit {
+                    level: Level::Info,
+                    message: format!("CAPS:{}", names.join(",")),
+                }]
+            }
+            _ => vec![],
+        }
+    }
 }
 
 #[test]

@@ -23,7 +23,8 @@ pub use context::{
     Supervision, Verdict, WallClock,
 };
 pub use journal::{
-    Commit, InMemoryJournal, JournalError, JournalFace, JournalOp, LineageInfo, Pending,
+    Commit, InMemoryJournal, JournalError, JournalFace, JournalOp, LineageInfo, MintFact,
+    Pending,
 };
 #[cfg(feature = "sqlite")]
 pub use sqlite_journal::SQLiteJournal;

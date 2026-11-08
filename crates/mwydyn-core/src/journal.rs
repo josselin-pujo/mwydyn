@@ -87,6 +87,15 @@ pub enum JournalError {
     Integrity(&'static str),
 }
 
+/// A journaled grant-set mutation (§3.3 tier rule: log-tier actors
+/// journal their mints; hydration reconstructs grant sets from them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintFact {
+    pub actor: String,
+    pub verb: String,
+    pub object: String,
+}
+
 /// The face (§8). Providers MUST: atomic batch commit at a durable
 /// point; contiguous per-lineage sequence; append-only, no retention
 /// loss; ordered byte-identical replay; serialized writes per
@@ -117,6 +126,20 @@ pub trait JournalFace: Send + Sync {
     fn cursor(&self, context: &str, lineage: u64, actor: &str) -> Result<Option<u64>, JournalError>;
     fn active_lineage(&self, context: &str) -> Result<u64, JournalError>;
     fn lineages(&self, context: &str) -> Result<Vec<LineageInfo>, JournalError>;
+    /// All letters addressed to `actor` with seq in `1..=up_to`, in
+    /// seq order — delivered AND undelivered. THE HYDRATION READ
+    /// (round 26): replay `1..=cursor` through a fresh instance with
+    /// effects discarded, and actor state is exactly as of the ack
+    /// boundary. Ghost letters are excluded (active lineage only).
+    fn letters_for(
+        &self,
+        context: &str,
+        actor: &str,
+        up_to: u64,
+    ) -> Result<Vec<Envelope>, JournalError>;
+    /// Mint facts for an actor (§3.3 tier rule) — hydration
+    /// reconstructs grant sets from these, on top of spawn rows.
+    fn mints(&self, context: &str, actor: &str) -> Result<Vec<MintFact>, JournalError>;
 }
 
 // ------------------------------------------------------ in-memory impl
@@ -138,6 +161,9 @@ struct CtxJournal {
     cursors: HashMap<(u64, String), u64>,
     /// (lineage, actor) → undelivered seqs, ascending.
     pending: HashMap<(u64, String), Vec<u64>>,
+    /// Journaled mint facts: (actor, verb, object) — hydration's
+    /// grant-set reconstruction reads these (round 26).
+    mints: Vec<MintFact>,
 }
 
 impl CtxJournal {
@@ -149,6 +175,7 @@ impl CtxJournal {
             local_max: HashMap::new(),
             cursors: HashMap::new(),
             pending: HashMap::new(),
+            mints: Vec::new(),
         }
     }
 
@@ -294,9 +321,14 @@ impl JournalFace for InMemoryJournal {
                         ctx.pending.insert(k, v);
                     }
                 }
-                JournalOp::Mint { .. } => {
+                JournalOp::Mint { actor, verb, object } => {
                     // Journaled for replay (§3.3 tier rule); row
-                    // reconstruction is hydration (M2b).
+                    // reconstruction is hydration (round 26).
+                    ctx.mints.push(MintFact {
+                        actor: actor.clone(),
+                        verb: verb.clone(),
+                        object: object.clone(),
+                    });
                 }
             }
         }
@@ -398,6 +430,43 @@ impl JournalFace for InMemoryJournal {
                 parent: l.parent,
                 active: (i + 1) as u64 == ctx.active,
             })
+            .collect())
+    }
+
+    fn letters_for(
+        &self,
+        context: &str,
+        actor: &str,
+        up_to: u64,
+    ) -> Result<Vec<Envelope>, JournalError> {
+        let Some(ctx) = self.ctxs.get(context) else {
+            return Err(JournalError::UnknownContext);
+        };
+        let target = Address::Instance(actor.to_string());
+        let covered = ctx.next_seq(ctx.active).saturating_sub(1);
+        let mut out = Vec::new();
+        for seq in 1..=up_to.min(covered) {
+            let Ok((lin, s)) = ctx.owner(ctx.active, seq) else {
+                continue;
+            };
+            if let Some(env) = ctx.entries.get(&(lin, s)) {
+                if env.to == target {
+                    out.push(env.clone());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn mints(&self, context: &str, actor: &str) -> Result<Vec<MintFact>, JournalError> {
+        let Some(ctx) = self.ctxs.get(context) else {
+            return Err(JournalError::UnknownContext);
+        };
+        Ok(ctx
+            .mints
+            .iter()
+            .filter(|m| m.actor == actor)
+            .cloned()
             .collect())
     }
 }

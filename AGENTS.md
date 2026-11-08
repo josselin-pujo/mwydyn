@@ -79,14 +79,15 @@ refusal, digest-pinned projections; core schemas
 carried verbatim, validation-by-CDDL is M1+). **The external outbox
 landed** — posts to `Instance("external")` drain via
 `drain_external()` (the embedding's handle, §3.4); `spawn_task` +
-`call_task` are the task pattern as verbs. **M2: journal face +
-TWO providers** (work-notes/20–23): `JournalFace` (§8 as a trait,
-Send+Sync) with InMemory + SQLiteJournal (`sqlite` cargo feature,
-DEFAULT ON — bundled rusqlite; WAL + synchronous=FULL = the
-durability point; entries as canonical CBOR, verify-on-read; forks
-delegate shared prefixes to parents — no copying). **Face tests are
-PARAMETERIZED over providers** (journal_face.rs) — the substrate
-independence proof. Ghost gate: `Host::ghost_read` behind
-`ghost.read` caps, three-way tested. **Next:** hydration (rebuild
-rows/schedules from journal) + durable-context walking test closes
-M2; then the executor (round 21) becomes buildable.
+`call_task` are the task pattern as verbs. **M2 CLOSED** (work-notes
+20–26): journal face + InMemory + SQLiteJournal (parameterized face
+tests = substrate independence); mailbox = cursor over the journal
+(one journal transaction per receive); rewind = journaled fork,
+ghost branches behind `ghost.read`; **hydration** (round 26) =
+composition declarative at open, replay of DELIVERED letters
+(1..=cursor) with effects discarded + clock pinned to journaled
+commit times + Mint facts rebuilt into rows — idempotent via
+base_rows reset; durable-context test proves work→die→reopen→keep
+working with exactly-once delivery. **Next:** M3 blob persistence +
+GC; the executor (round 21); WASM guests (world v0.3 binding);
+§7.6 snapshots for state-as-of-position.

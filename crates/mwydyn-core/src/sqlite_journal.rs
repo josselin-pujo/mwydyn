@@ -22,7 +22,7 @@ use rusqlite::{params, Connection};
 
 use crate::context::ClockFace;
 use crate::journal::{
-    Commit, JournalError, JournalFace, JournalOp, LineageInfo,
+    Commit, JournalError, JournalFace, JournalOp, LineageInfo, MintFact,
 };
 
 pub struct SQLiteJournal {
@@ -446,6 +446,80 @@ impl JournalFace for SQLiteJournal {
                 .map_err(sql_err)? as usize;
         }
         Ok(n)
+    }
+
+    fn letters_for(
+        &self,
+        context: &str,
+        actor: &str,
+        up_to: u64,
+    ) -> Result<Vec<Envelope>, JournalError> {
+        let conn = self.conn.lock().expect("journal mutex poisoned");
+        let active = active_of(&conn, context)?;
+        let mut out = Vec::new();
+        // Active-lineage segments only — ghost letters (abandoned
+        // lineages) are excluded from replay by construction.
+        for (lin, lo, hi) in segments(&conn, context, active, 1, up_to)? {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT seq, checksum, blob FROM entries
+                     WHERE context=?1 AND lineage=?2 AND to_actor=?3
+                       AND seq BETWEEN ?4 AND ?5 ORDER BY seq",
+                )
+                .map_err(sql_err)?;
+            let mut rows = stmt
+                .query(params![context, lin, actor, lo, hi])
+                .map_err(sql_err)?;
+            while let Some(row) = rows.next().map_err(sql_err)? {
+                let seq: u64 = row.get(0).map_err(sql_err)?;
+                let checksum: String = row.get(1).map_err(sql_err)?;
+                let blob: Vec<u8> = row.get(2).map_err(sql_err)?;
+                let mut env = decode_entry(&blob, &checksum)?;
+                if env.seq != seq {
+                    return Err(JournalError::Integrity("row seq does not match index"));
+                }
+                env.seq = seq;
+                out.push(env);
+            }
+        }
+        Ok(out)
+    }
+
+    fn mints(&self, context: &str, actor: &str) -> Result<Vec<MintFact>, JournalError> {
+        let conn = self.conn.lock().expect("journal mutex poisoned");
+        let mut stmt = conn
+            .prepare(
+                "SELECT data FROM facts WHERE context=?1 AND kind='mint' ORDER BY rowid",
+            )
+            .map_err(sql_err)?;
+        let blobs: Vec<Vec<u8>> = stmt
+            .query(params![context])
+            .map_err(sql_err)?
+            .mapped(|r| r.get::<_, Vec<u8>>(0))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for blob in blobs {
+            let v = mwydyn_data::decode(&blob, &mwydyn_data::DecodeOptions::default())
+                .map_err(|_| JournalError::Integrity("mint fact does not decode"))?;
+            let Value::Map(pairs) = v else {
+                return Err(JournalError::Integrity("mint fact is not a map"));
+            };
+            let field = |name: &str| -> Result<String, JournalError> {
+                pairs
+                    .iter()
+                    .find(|(k, _)| k == name)
+                    .and_then(|(_, v)| v.as_text())
+                    .map(|s| s.to_string())
+                    .ok_or(JournalError::Integrity("mint fact field missing"))
+            };
+            out.push(MintFact {
+                actor: field("actor")?,
+                verb: field("verb")?,
+                object: field("object")?,
+            });
+        }
+        Ok(out.into_iter().filter(|m| m.actor == actor).collect())
     }
 
     fn cursor(

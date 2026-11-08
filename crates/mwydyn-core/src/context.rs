@@ -160,6 +160,9 @@ struct Entry {
     factory: Box<dyn Fn() -> Box<dyn Actor> + Send>,
     supervision: Supervision,
     rows: Vec<CapRow>,
+    /// The spawn-time rows — hydration resets to these before
+    /// replaying journaled Mint facts (idempotent hydration).
+    base_rows: Vec<CapRow>,
     /// Mailbox bound — busy checks read the journal's pending count
     /// against this (§3.2). The queue itself lives in the journal
     /// (§3.1: the mailbox IS a cursor over the context journal).
@@ -294,7 +297,8 @@ impl Context {
             actor: Some(actor),
             factory: spec.factory,
             supervision: spec.supervision,
-            rows: spec.rows,
+            rows: spec.rows.clone(),
+            base_rows: spec.rows,
             bound: spec.mailbox_bound,
         });
         if let Some(n) = &spec.name {
@@ -736,6 +740,90 @@ impl Context {
         }
         self.external_outbox = keep;
         Ok(found)
+    }
+
+    /// Hydration (round 26): rebuild actor state from the journal.
+    /// Call after re-spawning the same composition on a reopened
+    /// journal — the composition is declarative at open; the journal
+    /// is the event truth.
+    ///
+    /// Per actor: rows reset to spawn rows + journaled Mint facts
+    /// (§3.3 tier rule); a fresh instance replays its DELIVERED
+    /// letters (`1..=cursor`) through `receive` with effects
+    /// DISCARDED and the host clock pinned to each letter's journaled
+    /// commit time — state lands exactly at the ack boundary, and
+    /// pending letters stay pending for live delivery. Purity
+    /// (§3.5) is what makes replay sound at all.
+    ///
+    /// Returns the number of letters replayed. Known limits (M3+):
+    /// the blob store is not yet durable, so replays that read blobs
+    /// put before the crash see loud Missing; rewind/fork shared
+    /// prefixes replay through the active lineage only.
+    pub fn hydrate(&mut self) -> Result<usize, JournalError> {
+        let mut replays = 0usize;
+        let active = self.journal.active_lineage(&self.name)?;
+        for idx in 0..self.entries.len() {
+            let id = self.entries[idx].id.clone();
+            // Rows: spawn rows + journaled mints (idempotent — the
+            // base reset makes repeated hydrate() calls safe).
+            let mints = self.journal.mints(&self.name, &id)?;
+            self.entries[idx].rows = self.entries[idx].base_rows.clone();
+            for m in &mints {
+                self.entries[idx].rows.push(CapRow::new(&m.verb, &m.object));
+            }
+            // State: fresh instance + deterministic replay of the
+            // delivered prefix.
+            let fresh = (self.entries[idx].factory)();
+            self.entries[idx].actor = Some(fresh);
+            let cursor = self
+                .journal
+                .cursor(&self.name, active, &id)?
+                .unwrap_or(0);
+            let letters = self.journal.letters_for(&self.name, &id, cursor)?;
+            for env in letters {
+                let outcome = {
+                    let Context {
+                        name,
+                        blobs,
+                        entries,
+                        clock,
+                        journal,
+                        ..
+                    } = self;
+                    let entry = &mut entries[idx];
+                    // Replay clock: the letter's journaled commit time —
+                    // deterministic state reconstruction (§6 honored).
+                    let ts = env.commit_ts.unwrap_or_else(|| clock.now_micros());
+                    let host = Host::new(blobs, &**journal, name, &entry.rows, ts);
+                    let ctx = MsgCtx {
+                        from: env.from.clone(),
+                    };
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        entry
+                            .actor
+                            .as_mut()
+                            .expect("fresh above")
+                            .receive(&ctx, &host, &env.letter)
+                    }))
+                };
+                // Effects are DISCARDED (they are already journaled);
+                // a panic during replay is skipped with a warning —
+                // the replayed state is approximate for that actor
+                // and the poison letter remains a live-delivery
+                // problem for the real pump.
+                match outcome {
+                    Ok(_) => replays += 1,
+                    Err(_) => {
+                        replays += 1;
+                        self.telemetry.push((
+                            Level::Warn,
+                            format!("{id}: replay panicked at seq {} — skipped", env.seq),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(replays)
     }
 
     /// Drive the context until no message is deliverable. `max_passes`
