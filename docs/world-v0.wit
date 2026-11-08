@@ -144,17 +144,26 @@ interface reads {
 // -------------------------------------------------------------- exports
 
 interface receiver {
-  use types.{effect, letter};
+  use types.{address, effect, letter};
 
-  /// A PURE TRANSITION: (instance memory, letter, blob-reads) →
-  /// effects. Called ONCE per inbox message, sequentially — the ABI
-  /// is the single-cursor invariant made mechanical (§3.2). No clock,
-  /// no ambient anything (§6); long compute is fuel/epoch-bounded.
+  /// Runtime-authored, read-only per-delivery context (§2): what the
+  /// runtime MINTED, visible to the guest but never settable — the
+  /// byzantine posture as a parameter split. Replies target `from`
+  /// (round 09's no-reply-to law). World draft v0.2, round 15.
+  record msg-ctx {
+    from: address,
+  }
+
+  /// A PURE TRANSITION: (instance memory, msg-ctx, letter, blob
+  /// reads) → effects. Called ONCE per inbox message, sequentially —
+  /// the ABI is the single-cursor invariant made mechanical (§3.2).
+  /// No clock, no ambient anything (§6); long compute is
+  /// fuel/epoch-bounded.
   ///
-  /// Purity is contractual: same memory + same letter + live refs ⇒
-  /// same effects. This is what makes replay-testing vector-shaped
-  /// and checkpoints trivially atomic (§7.6).
-  receive: func(letter: letter) -> list<effect>;
+  /// Purity is contractual: same memory + same ctx + same letter +
+  /// live refs ⇒ same effects. This is what makes replay-testing
+  /// vector-shaped and checkpoints trivially atomic (§7.6).
+  receive: func(ctx: msg-ctx, letter: letter) -> list<effect>;
 }
 
 interface boot {

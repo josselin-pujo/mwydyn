@@ -13,6 +13,7 @@ pub mod envelope;
 
 pub use decode::decode;
 pub use encode::encode;
+pub use envelope::{Address, Envelope, EnvelopeError, Letter, LETTER_PAYLOAD_CAP};
 
 /// Maximum nesting depth at decode (containers nest at most
 /// `MAX_DEPTH` levels; the leaf may sit at `MAX_DEPTH`).

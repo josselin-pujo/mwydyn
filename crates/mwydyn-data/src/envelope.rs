@@ -66,6 +66,28 @@ pub enum EnvelopeError {
 }
 
 impl Letter {
+    /// Structural validation (spec §3.5 admission's letter half).
+    /// Pub so the runtime can re-check letters whose fields were set
+    /// directly — the core trusts nothing.
+    pub fn validate(&self) -> Result<(), EnvelopeError> {
+        if self.kind.is_empty() {
+            return Err(EnvelopeError::EmptyKind);
+        }
+        if !valid_kind(&self.kind) {
+            return Err(EnvelopeError::BadKind(self.kind.clone()));
+        }
+        if self.payload.len() > LETTER_PAYLOAD_CAP {
+            return Err(EnvelopeError::PayloadTooLarge(self.payload.len()));
+        }
+        if self.cause.as_ref().is_some_and(|s| s.is_empty())
+            || self.correlation.as_ref().is_some_and(|s| s.is_empty())
+            || self.authority.iter().any(|a| a.is_empty())
+        {
+            return Err(EnvelopeError::EmptyReference);
+        }
+        Ok(())
+    }
+
     pub fn new(
         kind: impl Into<String>,
         payload: Vec<u8>,
@@ -73,29 +95,15 @@ impl Letter {
         correlation: Option<String>,
         authority: Vec<String>,
     ) -> Result<Letter, EnvelopeError> {
-        let kind = kind.into();
-        if kind.is_empty() {
-            return Err(EnvelopeError::EmptyKind);
-        }
-        if !valid_kind(&kind) {
-            return Err(EnvelopeError::BadKind(kind));
-        }
-        if payload.len() > LETTER_PAYLOAD_CAP {
-            return Err(EnvelopeError::PayloadTooLarge(payload.len()));
-        }
-        if cause.as_ref().is_some_and(|s| s.is_empty())
-            || correlation.as_ref().is_some_and(|s| s.is_empty())
-            || authority.iter().any(|a| a.is_empty())
-        {
-            return Err(EnvelopeError::EmptyReference);
-        }
-        Ok(Letter {
-            kind,
+        let letter = Letter {
+            kind: kind.into(),
             payload,
             cause,
             correlation,
             authority,
-        })
+        };
+        letter.validate()?;
+        Ok(letter)
     }
 }
 

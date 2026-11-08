@@ -42,6 +42,14 @@ serializer, not a validator (forged refs must be encodable for
 rejection vectors). Toolchain rustc 1.99.1. **Envelope + letter
 landed** ([envelope.rs](crates/mwydyn-data/src/envelope.rs) — byzantine
 posture as types, kind syntax pinned, canonical form + checksum;
-unit tests green). Next M0 slice: `mwydyn-core` (contexts, cursors,
-effects engine, admission, supervision, ticker, RAM blob store, task
-pattern) driven by native Rust actors over `receive → effects`.
+unit tests green). **`mwydyn-core` RUNS** (work-notes/15): native
+actors over `receive(ctx, host, letter) → effects` (MsgCtx = runtime-
+minted from, read-only); four-phase effects engine (transition →
+validate-all → classify → apply+commit); mailbox+cursor as one
+object; FailFast/Restart; ticker on an injected ClockFace (durations
+never timestamps); RamBlobStore with verify-on-read (hash-bound
+types); round-robin delivery (a busy actor must not starve
+neighbors — rotating scan start, work-notes/15). 10 walking tests +
+4 units + 2 corpora green, clippy clean. **Next:** task-pattern
+sugar; timer schemas into `mwydyn-schema` (first CDDL + registry);
+then M2 — the journal face, cursor leaves memory.
