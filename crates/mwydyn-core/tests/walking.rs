@@ -361,12 +361,9 @@ struct BlobActor;
 impl Actor for BlobActor {
     fn receive(&mut self, _ctx: &MsgCtx, host: &Host, letter: &Letter) -> Vec<Effect> {
         match letter.kind.as_str() {
-            "test.write@1" => vec![Effect::Put {
-                bytes: b"hello".to_vec(),
-                media_type: "text/plain".into(),
-                ttl_micros: None,
-            }],
-            "test.read@1" => {
+            // Both the publisher's posted ref and the test's direct
+            // read letters carry a blob-ref payload.
+            "test.ref@1" | "test.read@1" => {
                 let v = mwydyn_data::decode(&letter.payload, &DecodeOptions::default())
                     .expect("ref payload");
                 let Value::BlobRef {
@@ -403,33 +400,59 @@ impl Actor for BlobActor {
     }
 }
 
+/// Round 16's answer to "how does any actor ever get a blobRef":
+/// eagerly, from the ambient face — put, take the ref, post it, all
+/// in one receive.
+struct Publisher {
+    reader: Address,
+}
+
+impl Actor for Publisher {
+    fn receive(&mut self, _ctx: &MsgCtx, host: &Host, letter: &Letter) -> Vec<Effect> {
+        if letter.kind != "test.publish@1" {
+            return vec![];
+        }
+        let r = host
+            .blob_put(b"hello", "text/plain", None)
+            .expect("blob.write row held");
+        let payload = mwydyn_data::encode(&Value::BlobRef {
+            digest: r.digest.clone(),
+            media_type: r.media_type.clone(),
+            size: r.size,
+        });
+        vec![Effect::Post {
+            to: self.reader.clone(),
+            letter: Letter::new("test.ref@1", payload, None, None, vec![]).unwrap(),
+        }]
+    }
+}
+
 #[test]
-fn blob_put_lands_and_verified_reads_obey_caps() {
+fn blob_ref_in_hand_put_then_post_then_verified_read() {
     let mut ctx = Context::new("c1");
+    ctx.spawn(
+        Spawn::new(
+            Some("pub"),
+            Box::new(|| Box::new(Publisher {
+                reader: addr("c1", "blob"),
+            })),
+        )
+        .rows(vec![CapRow::new("blob.write", "*")]),
+    )
+    .unwrap();
     ctx.spawn(
         Spawn::new(
             Some("blob"),
             Box::new(|| Box::new(BlobActor)),
-            )
-        .rows(vec![CapRow::new("blob.read", "*"), CapRow::new("blob.write", "*")]),
+        )
+        .rows(vec![CapRow::new("blob.read", "*")]),
     )
     .unwrap();
-    // Write lands through the effects engine; the digest reply would
-    // go to external (dead letters — fine, the PUT is what matters).
-    let w = Letter::new("test.write@1", vec![], None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "blob"), w, vec![]);
+    let w = Letter::new("test.publish@1", vec![], None, None, vec![]).unwrap();
+    ctx.post(&addr("c1", "pub"), w, vec![]);
     ctx.run_until_idle(50);
-
-    // The test computes the same pure digest the actor's put did.
-    let digest = Value::blob_digest(b"hello", "text/plain").unwrap();
-    let ref_payload = mwydyn_data::encode(&Value::BlobRef {
-        digest: digest.clone(),
-        media_type: "text/plain".into(),
-        size: 5,
-    });
-    let r = Letter::new("test.read@1", ref_payload.clone(), None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "blob"), r, vec![]);
-    ctx.run_until_idle(50);
+    // Publisher eagerly put (blob.write), posted the ref, the reader
+    // verified and read it back — one pump, ref in hand throughout.
     assert!(ctx.telemetry().iter().any(|(_, m)| m == "READ:hello"));
 
     // A well-shaped ref whose CLAIMED TYPE does not match the stored
@@ -454,42 +477,41 @@ fn blob_put_lands_and_verified_reads_obey_caps() {
 }
 
 #[test]
-fn atomic_effects_rollback_the_whole_list() {
-    // The banking nerve (round 07): a list with one bad effect
-    // applies NOTHING — the put never lands.
-    struct PutAndBadPost;
-    impl Actor for PutAndBadPost {
-        fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, _letter: &Letter) -> Vec<Effect> {
-            vec![
-                Effect::Put {
-                    bytes: b"should-not-land".to_vec(),
-                    media_type: "text/plain".into(),
-                    ttl_micros: None,
-                },
-                Effect::Post {
-                    to: Address::Instance("external".into()),
-                    letter: Letter::new("test.x@1", vec![], None, None, vec![]).unwrap(),
-                },
-            ]
+fn atomic_effects_rollback_observable_state_allocations_are_garbage() {
+    // The banking nerve (round 07), amended by round 16: the POST in
+    // a bad list rolls back — nothing observable happens — but an
+    // EAGER put is not an effect: it leaves unreferenced garbage that
+    // GC (M3) collects. Observable state is identical either way.
+    struct EagerPutter;
+    impl Actor for EagerPutter {
+        fn receive(&mut self, _ctx: &MsgCtx, host: &Host, _letter: &Letter) -> Vec<Effect> {
+            let r = host
+                .blob_put(b"eager-garbage", "text/plain", None)
+                .expect("blob.write row held");
+            vec![Effect::Post {
+                to: Address::Instance("external".into()),
+                letter: Letter::new("test.ref@1", r.digest.into_bytes(), None, None, vec![])
+                    .unwrap(),
+            }]
         }
     }
     let mut ctx = Context::new("c1");
-    ctx.spawn(Spawn::new(Some("atomic"), Box::new(|| Box::new(PutAndBadPost)))).unwrap();
+    ctx.spawn(
+        Spawn::new(Some("atomic"), Box::new(|| Box::new(EagerPutter)))
+            .rows(vec![CapRow::new("blob.write", "*")]),
+    )
+    .unwrap();
     let l = Letter::new("test.go@1", vec![], None, None, vec![]).unwrap();
     ctx.post(&addr("c1", "atomic"), l, vec![]);
     ctx.run_until_idle(50);
+    // The observable transaction held: the letter struck out, no
+    // letter carrying the ref was ever committed anywhere.
     assert_eq!(ctx.dead_letters().len(), 1, "the letter struck out");
-    assert!(
-        !ctx.telemetry().iter().any(|(_, m)| m.contains("should-not-land")),
-        "no partial application"
-    );
-    // And the blob store is empty — the put was rolled back with the
-    // rest of the list.
-    let digest = Value::blob_digest(b"should-not-land", "text/plain").unwrap();
-    assert!(
-        ctx.telemetry().iter().all(|(_, m)| !m.contains(&digest)),
-        "digest never materialized"
-    );
+    assert_eq!(ctx.dead_letters()[0].letter.kind, "test.go@1");
+    // The allocation lingered as garbage — collectable above the
+    // watermark (M3), unobservable to every actor meanwhile.
+    let count = ctx.blob_count();
+    assert_eq!(count, 1, "eager put = garbage, not a committed effect");
 }
 
 #[test]

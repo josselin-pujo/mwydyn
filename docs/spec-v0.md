@@ -192,12 +192,21 @@
 - Location transparency: addresses are data; resolution is a runtime
   concern; in-proc vs network never changes message bytes.
 
-### 3.5 Effects and transactions [DECIDED, round 07]
+### 3.5 Effects and transactions [DECIDED, rounds 07+16]
 
 `receive` is a **pure transition**: `(instance memory, letter,
-blob-reads) → effect list`. The runtime validates, then applies
-effects in order. Writing is declaring — there is no `post`, `put`,
-`mint`, or `emit` import.
+ambient reads) → effect list`. The runtime validates, then applies
+effects in order. Effects are **post, mint, emit** — the *observable*
+things. **[amended, round 16]** `blob.put` is NOT an effect: it is an
+eager call on the ambient face (§4), returning the ref in hand. The
+owner's law: **allocation is not an effect** — a put creates
+content-addressed bytes and nothing else; if no committed reference
+ever forms, it is unobservable garbage that reference-aware GC
+collects (M3), so a rolled-back list and a never-executed one are
+indistinguishable in observable state. (This amendment also resolved
+a real spec contradiction: §4 had `put` as an ambient WIT function
+since round 02; round 07's effect list contradicted that — the
+owner caught it by asking how any actor ever gets a ref to post.)
 
 - **The transaction boundary [DECIDED, round 08]**: within the
   receiving context, state transition + all effects commit as **one
@@ -210,14 +219,17 @@ effects in order. Writing is declaring — there is no `post`, `put`,
   sky, nothing to fall over when scale hits. The wall is one wall
   with three names: trust boundary, clock domain, transaction
   boundary.
+- **Puts are eager and non-observable** (round 16): `host.blob_put`
+  returns the ref *during* receive — the actor embeds it in posts
+  freely, saves it in state, or drops it (garbage). Replay re-puts
+  identically (pure in `(bytes, type)`); GC collects unreferenced
+  garbage above the live watermark (M3).
 - **Validation happens before any application** (fail-before-compute):
   structural envelope laws, sizes under the cap, authority rows
-  present, digests resolvable, capacity/caps admissible. **The core
-  is schema-blind** (§7.9, round 10): `kind` is an opaque string,
-  payloads are opaque bytes — schema validity is an edge, embedding,
-  or actor concern, never admission. Content addressing closes the
-  data-flow gap: a `put`'s digest is computed at validation, so a
-  later `post` in the same list can reference it.
+  present, capacity/caps admissible. **The core is schema-blind**
+  (§7.9, round 10): `kind` is an opaque string, payloads are opaque
+  bytes — schema validity is an edge, embedding, or actor concern,
+  never admission.
 - **Two refusal classes at admission**: `busy` = temporary — the
   *letter* re-queues at its inbox tail, no delivery attempt burned
   (overload becomes self-healing: the actor re-receives and re-declares);
@@ -243,11 +255,13 @@ content-addressed, idempotent. Mailbox round-trips on them are
 ceremony without payoff.
 
 - The store is an **ambient host service behind the frozen WIT world**:
-  `blob.put(bytes, ttl?) → ref`, `blob.get(ref) → bytes |
+  `blob.put(bytes, mediaType, ttl?) → ref`, `blob.get(ref) → bytes |
   loud-missing`, `blob.len(ref)`, `blob.get_range(ref, range)` —
   synchronous host functions, hardcoded Rust, collocated in every
   runtime. (Range/len exist so consumers stream without materializing
-  — docgen's PDFs.)
+  — docgen's PDFs.) **Round 16: put is eager-during-receive, not an
+  effect (§3.5) — allocation is not an effect; the ref is in the
+  actor's hand the moment the call returns.**
 - The **blob reference is a first-class CBOR type: tag 1002**
   [DECIDED, round 12; profile v0 → v0.1] wrapping
   `{ digest, mediaType, size }` — digest = 64-char lowercase hex

@@ -229,6 +229,12 @@ impl Context {
         &self.dead_letters
     }
 
+    /// Blob-store size — diagnostics/garbage observation only. Reach-
+    /// ability (what GC may collect) is a watermark question, M3.
+    pub fn blob_count(&self) -> usize {
+        self.blobs.count()
+    }
+
     /// Spawn an actor. Naming is opt-in (§3.4): named = addressable,
     /// refuse-on-collision; unnamed = only the spawner's handle.
     /// `ticker` is runtime-reserved.
@@ -413,12 +419,6 @@ impl Context {
                     }
                     *inflight += 1;
                 }
-                Effect::Put { media_type, .. } => {
-                    if media_type.is_empty() {
-                        block = Some(Block::Strike("empty media type in put"));
-                        break;
-                    }
-                }
                 Effect::Mint {
                     source_verb,
                     source_object,
@@ -481,29 +481,22 @@ impl Context {
         let actor_id = self.entries[idx].id.clone();
         for eff in &effects {
             match eff {
-                Effect::Post { to, letter } => {
-                    let tidx = self.resolve(to).expect("validated above");
-                    let envelope = Envelope::new(
-                        letter.clone(),
-                        0,
-                        Address::Instance(actor_id.clone()),
-                        to.clone(),
-                        None,
-                        actor_id.clone(),
-                    )
-                    .expect("validated above");
-                    self.entries[tidx].mailbox.queue.push_back(envelope);
-                }
-                Effect::Put {
-                    bytes,
-                    media_type,
-                    ttl_micros,
-                } => {
-                    let _ = self.blobs.put(bytes, media_type, *ttl_micros);
-                }
-                Effect::Mint { verb, object, .. } => {
-                    self.entries[idx].rows.push(CapRow::new(verb, object));
-                }
+            Effect::Post { to, letter } => {
+                let tidx = self.resolve(to).expect("validated above");
+                let envelope = Envelope::new(
+                    letter.clone(),
+                    0,
+                    Address::Instance(actor_id.clone()),
+                    to.clone(),
+                    None,
+                    actor_id.clone(),
+                )
+                .expect("validated above");
+                self.entries[tidx].mailbox.queue.push_back(envelope);
+            }
+            Effect::Mint { verb, object, .. } => {
+                self.entries[idx].rows.push(CapRow::new(verb, object));
+            }
                 Effect::Emit { level, message } => {
                     self.telemetry.push((*level, message.clone()));
                 }

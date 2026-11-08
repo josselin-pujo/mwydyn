@@ -8,6 +8,8 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-vectors/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-vectors/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-vectors/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-core/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-data/examples" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

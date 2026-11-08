@@ -17,17 +17,14 @@ pub enum Level {
 }
 
 /// Effects declared by `receive`, applied by the runtime in order
-/// after validate-all (§3.5).
+/// after validate-all (§3.5). ONLY the observable things — `put` is
+/// not here: allocation is not an effect (round 16), it happens
+/// eagerly on the ambient face with the ref in hand.
 #[derive(Debug, Clone)]
 pub enum Effect {
     Post {
         to: mwydyn_data::Address,
         letter: Letter,
-    },
-    Put {
-        bytes: Vec<u8>,
-        media_type: String,
-        ttl_micros: Option<u64>,
     },
     /// Attenuation-only, holder-only (§3.3). M0's algebra is the
     /// trivial one — exact source-row match; per-service algebras are
@@ -81,6 +78,25 @@ impl<'a> Host<'a> {
             caps,
             now_micros,
         }
+    }
+
+    /// Eager ambient allocation (round 16): the ref is in hand the
+    /// moment this returns — embed it in posts, save it in state, or
+    /// drop it (unreferenced garbage; GC collects, M3). Requires a
+    /// live `blob.write` row. NOT an effect: nothing here is
+    /// observable to other actors until a committed reference forms.
+    pub fn blob_put(
+        &self,
+        bytes: &[u8],
+        media_type: &str,
+        ttl_micros: Option<u64>,
+    ) -> Result<BlobRef, BlobAccess> {
+        if !self.caps.iter().any(|row| row.holds("blob.write", "*")) {
+            return Err(BlobAccess::Unauthorized);
+        }
+        self.blobs
+            .put(bytes, media_type, ttl_micros)
+            .map_err(|_| BlobAccess::Integrity)
     }
 
     /// Repeatable by contract (§3.5): content-addressed answers; a
