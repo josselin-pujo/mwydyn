@@ -346,15 +346,28 @@ ceremony without payoff.
   recorded; the journal is law; whatever happens that creates the
   stream of events that are journaled is what it is"* (owner).
   Replay follows the journal and is deterministic given it. The
-  mechanism (post-M2 executor): workers run phase-1 transitions
-  concurrently; a committer lands them in DISPATCH order —
-  parallelism with deterministic commit order. The serial
-  `run_until_idle` pump stays forever as the deterministic mode
-  (tests, replay verification). Readiness bounds bought now:
-  `JournalFace: Send+Sync` (external providers are threaded — one
-  that cannot cross threads is not a real provider), `Actor: Send`
-  (no `Rc` in actor state, by contract), `ClockFace: Send+Sync`,
-  blob store `Mutex`.
+  mechanism (LANDED, round 34): `ctx.workers(n)` — wave dispatch,
+  workers run phase-1 transitions (forks included) concurrently; the
+  pump thread commits in DISPATCH order — parallelism with
+  deterministic commit order. The serial `run_until_idle` pump stays
+  forever as the deterministic mode (tests, replay verification).
+  Readiness bounds bought now: `JournalFace: Send+Sync` (external
+  providers are threaded — one that cannot cross threads is not a
+  real provider), `Actor: Send` (no `Rc` in actor state, by
+  contract), `ClockFace: Send+Sync`, blob store `Mutex`.
+- **Durability IO pipelining [DECIDED + VERIFIED, round 34]**: the
+  hot journal applies every per-receive transaction INSTANTLY (the
+  mailbox is a cursor over the journal — buffering acks inside the
+  hot face re-delivers letters, proven the hard way); the overlay
+  drains the op log to the durable face as ONE transaction on
+  POLICY (`max_ops_per_flush`, default 256; quiescence respects the
+  policy; the embedding's `flush_durability()` is THE barrier).
+  Durability IO is a function of the knob, never the exchange count
+  — verified at the SQLite boundary with a counting face: 2,000
+  exchanges → one transaction; the undrained tail is the
+  at-least-once redo window; letters posted but undrained are lost
+  on death (post-before-barrier). `hydrate()` reads delivered
+  history from the durable face when the overlay is present.
 - **The WASM barrier [DECIDED, round 33]**: canonical CBOR bytes
   are the WASM ABI — `Value`-in-memory never crosses a boundary,
   the same law the journal runs (journal ⇄ wire ⇄ barrier: one

@@ -333,3 +333,143 @@ fn compiled_guest_work_order_throughput() {
         throughput
     );
 }
+
+/// COMPOSE-PARITY UNDER THE POOL (round 34): WASM guests ride the
+/// worker pool exactly like native actors — transitions move across
+/// threads (Actor: Send), commits land in dispatch order, the
+/// work-order completes and reports OUT through the same barrier.
+#[test]
+fn pool_runs_wasm_guests_and_natives_alike() {
+    let artifact = Path::new("tests/artifacts/mwydyn_guest_minimal.wasm");
+    if !artifact.exists() {
+        eprintln!("SKIP: guest artifact missing — run scripts/build-guest.sh");
+        return;
+    }
+    let wasm = std::fs::read(artifact).expect("artifact reads");
+    let mut ctx = Context::new("wpool");
+    ctx.workers(4);
+    for name in ["ping", "pong"] {
+        let wasm = wasm.clone();
+        ctx.spawn(
+            Spawn::new(
+                Some(name),
+                Box::new(move || {
+                    let engine = WasmEngine::new().expect("engine");
+                    Box::new(WasmActor::from_compiled(&engine, &wasm).expect("guest"))
+                }),
+            )
+            .supervision(mwydyn_core::Supervision::Restart),
+        )
+        .unwrap();
+    }
+    let reply_to = address_to_value(&addr("wpool", "pong"));
+    let items = Value::Array(vec![
+        Value::map(vec![
+            ("qty".into(), Value::Int(3)),
+            ("sku".into(), Value::Text("widget".into())),
+            ("unitPrice".into(), Value::Float(2.5)),
+        ])
+        .unwrap(),
+    ]);
+    let payload = encode(&Value::map(vec![
+        ("due".into(), Value::Timestamp(1_770_000_000_000_000)),
+        ("hops".into(), Value::Array(vec![])),
+        ("items".into(), items),
+        ("maxHops".into(), Value::Int(10)),
+        ("orderId".into(), Value::Text("wo-pool".into())),
+        ("priority".into(), Value::Int(7)),
+        ("replyTo".into(), reply_to),
+    ])
+    .unwrap());
+    let kick = Letter::new("test.work-order@1", payload, None, None, vec![]).unwrap();
+    ctx.post(&addr("wpool", "ping"), kick, vec![]);
+    ctx.run_until_idle(500);
+    let drained = ctx.drain_external();
+    assert_eq!(drained.len(), 1, "the pooled bounce completed");
+    let final_order = decode(&drained[0].letter.payload, &DecodeOptions::default()).expect("canonical");
+    let Value::Map(pairs) = final_order else {
+        panic!("final payload is a map");
+    };
+    let hops = pairs
+        .iter()
+        .find(|(k, _)| k == "hops")
+        .map(|(_, v)| match v {
+            Value::Array(h) => h.len(),
+            _ => 0,
+        })
+        .unwrap_or(0);
+    assert_eq!(hops, 10, "every hop stamped across pooled transitions");
+}
+
+/// THE POOL'S HEADLINE CLAIM (round 34): WASM transitions are
+/// expensive (~300µs of decode/encode) — parallelizing them across
+/// workers is where the pool pays. 8 guests × 100 work-orders,
+/// serial vs pool(4).
+#[test]
+fn wasm_guest_transitions_parallelize() {
+    let artifact = Path::new("tests/artifacts/mwydyn_guest_minimal.wasm");
+    if !artifact.exists() {
+        eprintln!("SKIP: guest artifact missing — run scripts/build-guest.sh");
+        return;
+    }
+    let wasm = std::fs::read(artifact).expect("artifact reads");
+
+    let run = |workers: usize| -> f64 {
+        let mut ctx = Context::new("wt");
+        if workers > 1 {
+            ctx.workers(workers);
+        }
+        for g in 0..8 {
+            let name = format!("guest-{g}");
+            let wasm = wasm.clone();
+            ctx.spawn(
+                Spawn::new(
+                    Some(&name),
+                    Box::new(move || {
+                        let engine = WasmEngine::new().expect("engine");
+                        Box::new(WasmActor::from_compiled(&engine, &wasm).expect("guest"))
+                    }),
+                )
+                .supervision(mwydyn_core::Supervision::Restart),
+            )
+            .unwrap();
+        }
+        let per_guest = 25; // ×2 transitions ×8 guests = 400 exchanges
+        let start = std::time::Instant::now();
+        for g in 0..8 {
+            for k in 0..per_guest {
+                let reply_to = address_to_value(&addr("wt", &format!("guest-{}", (g + 1) % 8)));
+                let items = Value::Array(vec![Value::map(vec![
+                    ("qty".into(), Value::Int(3)),
+                    ("sku".into(), Value::Text("widget".into())),
+                    ("unitPrice".into(), Value::Float(2.5)),
+                ])
+                .unwrap()]);
+                let payload = encode(&Value::map(vec![
+                    ("due".into(), Value::Timestamp(1_770_000_000_000_000)),
+                    ("hops".into(), Value::Array(vec![])),
+                    ("items".into(), items),
+                    ("maxHops".into(), Value::Int(1)),
+                    ("orderId".into(), Value::Text(format!("wo-{g}-{k}"))),
+                    ("priority".into(), Value::Int(7)),
+                    ("replyTo".into(), reply_to),
+                ])
+                .unwrap());
+                let l = Letter::new("test.work-order@1", payload, None, None, vec![]).unwrap();
+                ctx.post(&addr("wt", &format!("guest-{g}")), l, vec![]);
+            }
+        }
+        ctx.run_until_idle(10_000);
+        let elapsed = start.elapsed();
+        let done = ctx.drain_external().len();
+        assert_eq!(done, 8 * per_guest, "every work-order reported out");
+        (8 * per_guest * 2) as f64 / elapsed.as_secs_f64()
+    };
+
+    let serial = run(0);
+    let parallel = run(4);
+    eprintln!(
+        "WASM transitions, 8 guests: serial {:.0} exchanges/s, pool(4) {:.0} exchanges/s",
+        serial, parallel
+    );
+}

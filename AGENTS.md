@@ -71,6 +71,28 @@ tag-1002 digests across EVERY lineage (active AND ghost: ghosts are
 readable, so ghost-referenced blobs survive GC); payload scanning is
 data-model work (tag 1002), not schema — round 10 intact, sweep-only;
 `Context::with_stores` = the durable combo constructor.
+**ROUND 34: WORKER POOL + IO PIPELINING VERIFIED** (work-notes/33):
+`ctx.workers(n)` wave-dispatch pool — transitions (forks included)
+parallel on workers, the pump thread COMMITS in dispatch order
+(journal order = dispatch order; serial pump stays as the
+deterministic mode); serial/pool semantic equivalence + WASM
+compose-parity under the pool PROVEN. **IO PIPELINING**: hot journal
+applies per-receive transactions instantly (buffering acks in the
+hot face = re-delivery — proven by the m2×50 lesson; the mailbox is
+a cursor); the OVERLAY drains to the durable face on POLICY
+(`max_ops_per_flush` default 256 + explicit `flush_durability()`
+barrier) — VERIFIED at the SQLite boundary: 2,000 exchanges → ONE
+transaction; knob drives the count (K=64 vs K=512, ≥4×);
+crash-before-drain redoes from the durable point. Two latent defects
+found and fixed: group commit was actually per-exchange; the
+overlay was a silent no-op (inherent-vs-trait method shadowing —
+face-level provider tests would have caught it; conformance vectors
+queued). hydrate() reads durable history on the overlay tier.
+Throughput HONEST report: pool parity today (spawn-per-wave eats the
+overlap; fork=120µs + receive=71µs parallelizable vs ~200µs serial
+committer) — persistent executor threads need the §8 face-contract
+decision (commit-&self / read-face split / sanctioned scoped-pool
+unsafe) — OPEN in §7 queue.
 **M1 WASM container RUNS** (work-notes/31): `WasmActor` wrapping
 wasmtime Store + Instance + TypedFunc; ping/pong through Context
 pump at 3434 bounces/s (5000 bounces, 2 WASM actors, RAM tier);

@@ -19,14 +19,112 @@ fn payload_canonical(bytes: &[u8]) -> bool {
     mwydyn_data::decode(bytes, &DecodeOptions::default()).is_ok()
 }
 
+// ------------------------------------------------------------------
+// ROUND 34 — the worker pool's transition tier
+//
+
+/// One dispatched transition: the actor moves to the worker, runs
+/// phase 1 against a read-only host face, and comes back with either
+/// effects or a crash. `Actor: Send` (round 21's bound) is what
+/// makes this legal.
+struct WaveJob {
+    seq: u64,
+    actor: Box<dyn Actor>,
+    letter: Letter,
+    from: Address,
+    rows: Vec<CapRow>,
+    now: i64,
+}
+
+struct WaveOutcome {
+    seq: u64,
+    outcome: std::result::Result<Vec<Effect>, ()>,
+    actor: Box<dyn Actor>,
+    /// The worker-side pre-receive copy — the rollback state for
+    /// refusals/crashes. Forking on the WORKER (not at staging)
+    /// parallelizes the fork too, which is the expensive half for
+    /// WASM guests (module re-instantiation).
+    rollback: Box<dyn Actor>,
+}
+
+/// Run one wave of transitions on `workers` scoped threads. The host
+/// face is read-only (§3.5: phase 1 touches nothing committable), so
+/// workers share the journal/blob references safely. Results come
+/// back with their dispatch seq — the COMMITTER (caller) decides the
+/// landing order, which is dispatch order.
+fn run_wave(
+    jobs: Vec<WaveJob>,
+    workers: usize,
+    blobs: &dyn crate::blob::BlobFace,
+    journal: &dyn JournalFace,
+    name: &str,
+) -> Vec<WaveOutcome> {
+    use std::sync::{Arc, Mutex};
+    let total = jobs.len();
+    if total == 0 {
+        return Vec::new();
+    }
+    let (job_tx, job_rx) = std::sync::mpsc::channel::<WaveJob>();
+    let (res_tx, res_rx) = std::sync::mpsc::channel::<WaveOutcome>();
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let n_threads = workers.min(total).max(1);
+
+    std::thread::scope(|s| {
+        for job in jobs {
+            let _ = job_tx.send(job);
+        }
+        drop(job_tx);
+        for _ in 0..n_threads {
+            let rx = Arc::clone(&job_rx);
+            let res_tx = res_tx.clone();
+            s.spawn(move || loop {
+                let Ok(job) = rx.lock().expect("job queue").recv() else {
+                    break; // queue closed and drained: wave over
+                };
+                let WaveJob { seq, mut actor, letter, from, rows, now } = job;
+                // Pre-receive copy ON THE WORKER (§3.5's transactional
+                // receive): forking is part of the transition's cost
+                // and parallelizes with everything else.
+                let rollback = actor.fork();
+                let host = Host::new(blobs, journal, name, &rows, now);
+                let ctx = MsgCtx { from };
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    actor.receive(&ctx, &host, &letter)
+                }));
+                let _ = res_tx.send(WaveOutcome {
+                    seq,
+                    outcome: outcome.map_err(|_| ()),
+                    actor,
+                    rollback,
+                });
+            });
+        }
+        drop(res_tx); // this thread's copy; workers hold clones
+    });
+    // The scope has joined: every worker sent its result before exit.
+    let mut results = Vec::with_capacity(total);
+    for _ in 0..total {
+        if let Ok(r) = res_rx.recv() {
+            results.push(r);
+        }
+    }
+    results
+}
+
 use crate::actor::{Actor, CapRow, Effect, Host, Level, MsgCtx};
 use crate::blob::{BlobFace, BlobRef, RamBlobStore};
-use crate::journal::{InMemoryJournal, JournalError, JournalFace, JournalOp, Pending};
+use crate::journal::{InMemoryJournal, JournalError, JournalFace, JournalOp, MintFact, Pending};
 use crate::ticker::Ticker;
 
 /// The embedding's instance id — posts FROM here; replies TO it land
 /// in the drainable external outbox (§3.4: the embedding's handle).
 pub const EXTERNAL: &str = "external";
+
+/// ROUND 34 — default durability-drain policy: the overlay lands
+/// the hot op log on the durable face as ONE transaction at 256 ops
+/// (and at quiescence). The knob, not the exchange count, drives
+/// durability IO.
+pub const DEFAULT_MAX_OPS_PER_FLUSH: usize = 256;
 
 /// Poison-letter strikes before the dead-letter path (§3.1's
 /// policy-authorized cursor advance).
@@ -250,9 +348,17 @@ pub struct Context {
     /// (consumed by flush_durability when the durable face is present).
     #[allow(dead_code)]
     synced_through: usize,
-    /// Buffered journal ops awaiting the pass-boundary commit —
-    /// group commit (§8.2: the batch IS the transaction).
-    pending_ops: Vec<JournalOp>,
+    /// ROUND 34 — THE DURABILITY DRAIN POLICY (§8.2/§8.5): when the
+    /// hot journal's unsynced op log reaches this many ops (and at
+    /// quiescence), `flush_durability` lands them on the durable
+    /// face as ONE transaction. Durability IO is a function of THIS
+    /// knob — never of the exchange count. Default 256; no-op on the
+    /// RAM tier.
+    max_ops_per_flush: usize,
+    /// ROUND 34 — the worker pool (§6): transitions on `workers`
+    /// threads, commits land in dispatch order on the pump thread.
+    /// 0/1 = the serial pump (deterministic mode, tests/replay).
+    workers: usize,
     /// Replies to `external` land here — the embedding's drainable
     /// inbox (§3.4: the embedding's handle). The letters are ALSO
     /// journaled (everything committed is); this is the convenience
@@ -307,7 +413,8 @@ impl Context {
             journal,
             durable: None,
             synced_through: 0,
-            pending_ops: Vec::new(),
+            max_ops_per_flush: DEFAULT_MAX_OPS_PER_FLUSH,
+            workers: 0,
             external_outbox: VecDeque::new(),
             telemetry: Vec::new(),
             dead_letters: Vec::new(),
@@ -350,7 +457,8 @@ impl Context {
             journal: Box::new(InMemoryJournal::new(Box::new(WallClock))),
             durable: Some(durable),
             synced_through: 0,
-            pending_ops: Vec::new(),
+            max_ops_per_flush: DEFAULT_MAX_OPS_PER_FLUSH,
+            workers: 0,
             external_outbox: VecDeque::new(),
             telemetry: Vec::new(),
             dead_letters: Vec::new(),
@@ -630,20 +738,7 @@ impl Context {
             if entry.actor.is_none() {
                 // Terminal: fail-fast is loud — never silently holding
                 // mail. Strike the pending letters out (journaled).
-                if !pending.is_empty() {
-                    let mut ops = Vec::new();
-                    for env in &pending {
-                        ops.push(JournalOp::DeadLetter {
-                            actor: entry.id.clone(),
-                            why: "actor terminal (fail-fast)".into(),
-                        });
-                        ops.push(JournalOp::Ack {
-                            actor: entry.id.clone(),
-                            position: env.seq,
-                        });
-                    }
-                    let _ = self.journal.commit(&self.name, ops);
-                    self.dead_letters.extend(pending);
+                if self.drain_terminal(idx) {
                     self.next_scan = (idx + 1) % n;
                     return true;
                 }
@@ -659,8 +754,6 @@ impl Context {
     }
 
     fn deliver(&mut self, idx: usize, env: Envelope) -> bool {
-        let actor_id = self.entries[idx].id.clone();
-
         // §3.5 transactional receive: fork pre-receive state. On
         // refusal, restore the fork — the state rolls back to the
         // ack boundary, the letter stays pending (Busy) or strikes
@@ -700,6 +793,25 @@ impl Context {
                 return true;
             }
         };
+        // Phases 2-4 — validate, classify, buffer (round 34: shared
+        // with the worker pool's committer). On refusal the fork
+        // replaces the mutated state.
+        if !self.land_effects(idx, &env, effects) {
+            self.entries[idx].actor = Some(fork);
+        }
+        true
+    }
+
+    /// ROUND 34 — the committer's tail (§3.5 phases 2-4), shared by
+    /// the serial pump and the worker pool: validate ALL effects,
+    /// classify (Busy: no commit, Strike: burn attempt), buffer the
+    /// transaction. Returns whether the transition's state mutation
+    /// is KEPT (`false` = the caller must restore the fork). The
+    /// worker pool applies these in DISPATCH order — the journal's
+    /// total order is dispatch order, so replay stays deterministic
+    /// given the log (round 21's law).
+    fn land_effects(&mut self, idx: usize, env: &Envelope, effects: Vec<Effect>) -> bool {
+        let actor_id = self.entries[idx].id.clone();
 
         // Phase 2 — validate ALL effects before committing ANY
         // (fail-before-compute, §3.5). Projected capacity counts this
@@ -761,20 +873,18 @@ impl Context {
         }
 
         // Phase 3 — classify (§3.5's two refusal classes). On ANY
-        // refusal, restore the fork: the state rolls back to the ack
-        // boundary, the letter stays pending (Busy: no attempt burned)
-        // or burns an attempt (Strike: N strikes → dead-letter).
+        // refusal, the state rolls back to the ack boundary, the
+        // letter stays pending (Busy: no attempt burned) or burns an
+        // attempt (Strike: N strikes -> dead-letter).
         match block {
             Some(Block::Busy) => {
-                self.entries[idx].actor = Some(fork);
                 self.telemetry.push((
                     Level::Debug,
                     format!("{actor_id}: target busy — state rolled back, no attempt burned"),
                 ));
-                return true;
+                return false;
             }
             Some(Block::Strike(why)) => {
-                self.entries[idx].actor = Some(fork);
                 let key = (actor_id.clone(), env.seq);
                 let strikes = self.strikes.entry(key.clone()).or_insert(0);
                 *strikes += 1;
@@ -798,16 +908,16 @@ impl Context {
                         ],
                     );
                     self.strikes.remove(&key);
-                    self.dead_letters.push(env);
+                    self.dead_letters.push(env.clone());
                 }
-                return true;
+                return false;
             }
             None => {}
         }
 
         // Phase 4 — build ONE journal transaction: the effect posts,
         // the mint facts, and the ack (log owns acks, §3.1). The
-        // mutated state is KEPT (fork is dropped).
+        // mutated state is KEPT (caller drops the fork).
         let mut ops: Vec<JournalOp> = Vec::new();
         for eff in &effects {
             match eff {
@@ -845,15 +955,55 @@ impl Context {
             actor: actor_id.clone(),
             position: env.seq,
         });
-        // GROUP COMMIT (round 32): ops are buffered across deliveries
-        // and flushed as one journal transaction at the pass boundary.
-        self.pending_ops.extend(ops);
-        // Pop the delivered letter from the entry's queue — the fork
-        // is dropped (mutation kept), the cursor advances.
+        // ROUND 32/34 — ONE journal transaction per receive: posts +
+        // mints + ack together (§8.2's atomicity unit). The hot face
+        // applies it INSTANTLY — the mailbox is a cursor over the
+        // journal (§3.1), so a buffered ack would re-offer the
+        // letter (round 34's lesson: buffering acks = re-delivery).
+        // DURABILITY IO is pipelined separately, at the overlay
+        // boundary (`flush_durability`), never by withholding ops
+        // from the hot journal.
+        let commit = self
+            .journal
+            .commit(&self.name, ops)
+            .expect("receive commit");
+        // Populate the external outbox from the commit's appended
+        // envelopes addressed to `external` (§3.4's handle).
+        for env in &commit.appended {
+            if Self::is_external(&env.to) {
+                self.external_outbox.push_back(env.clone());
+            }
+        }
         self.strikes.remove(&(actor_id.clone(), env.seq));
         true
     }
 
+    /// A terminal entry's pending mail drains loudly to dead letters
+    /// (journaled). Used by the serial scan and the pool's wave
+    /// composition alike.
+    fn drain_terminal(&mut self, idx: usize) -> bool {
+        let pending = self
+            .journal
+            .pending(&self.name, &self.entries[idx].id)
+            .unwrap_or_default();
+        if pending.is_empty() {
+            return false;
+        }
+        let mut ops = Vec::new();
+        for env in &pending {
+            ops.push(JournalOp::DeadLetter {
+                actor: self.entries[idx].id.clone(),
+                why: "actor terminal (fail-fast)".into(),
+            });
+            ops.push(JournalOp::Ack {
+                actor: self.entries[idx].id.clone(),
+                position: env.seq,
+            });
+        }
+        let _ = self.journal.commit(&self.name, ops);
+        self.dead_letters.extend(pending);
+        true
+    }
 
     fn handle_crash(&mut self, idx: usize) {
         let id = self.entries[idx].id.clone();
@@ -953,26 +1103,6 @@ impl Context {
         Ok(count)
     }
 
-    /// GROUP COMMIT (§8.2): flush all buffered journal ops as ONE
-    /// transaction. Called at the pass boundary — the fsync/quorum
-    /// wait amortizes across every delivery in the pass. On the RAM
-    /// tier, this is a no-op (the hot journal already applied the
-    /// ops); on the durable tier, this is THE fsync.
-    fn flush_pending_ops(&mut self) {
-        let ops = std::mem::take(&mut self.pending_ops);
-        if ops.is_empty() {
-            return;
-        }
-        let commit = self.journal.commit(&self.name, ops).expect("flush commit");
-        // Populate the external outbox from the commit's appended
-        // envelopes addressed to `external` (§3.4's handle).
-        for env in &commit.appended {
-            if Self::is_external(&env.to) {
-                self.external_outbox.push_back(env.clone());
-            }
-        }
-    }
-
     /// Rewind the context to `position` on the active lineage (§8.3):
     /// a journaled fork. The future beyond `position` becomes a ghost
     /// branch — readable behind `ghost.read`, never deliverable.
@@ -1064,13 +1194,40 @@ impl Context {
     /// put before the crash see loud Missing; rewind/fork shared
     /// prefixes replay through the active lineage only.
     pub fn hydrate(&mut self) -> Result<usize, JournalError> {
+        // ROUND 34: on the durability overlay tier the HOT journal
+        // starts empty on reopen — the delivered history (cursors,
+        // letters, mints) lives on the DURABLE face. Read history
+        // from wherever it actually is. (Two passes: the immutable
+        // history reads complete into owned data before any mutation
+        // — the borrow of the history face must not span the replay.)
+        type EntryHistory = (Vec<MintFact>, u64, Vec<mwydyn_data::Envelope>);
+        let mut per_entry: Vec<EntryHistory> = {
+            let history: &dyn JournalFace = match &self.durable {
+                Some(d) => &**d,
+                None => &*self.journal,
+            };
+            let active = history.active_lineage(&self.name)?;
+            let mut per_entry = Vec::with_capacity(self.entries.len());
+            for entry in &self.entries {
+                let mints = history.mints(&self.name, &entry.id)?;
+                let cursor = history
+                    .cursor(&self.name, active, &entry.id)?
+                    .unwrap_or(0);
+                let letters = history
+                    .letters_for(&self.name, &entry.id, cursor)?
+                    .into_iter()
+                    .filter(|env| env.seq >= entry.replay_from)
+                    .collect::<Vec<_>>();
+                per_entry.push((mints, cursor, letters));
+            }
+            per_entry
+        };
         let mut replays = 0usize;
-        let active = self.journal.active_lineage(&self.name)?;
         for idx in 0..self.entries.len() {
             let id = self.entries[idx].id.clone();
+            let (mints, _cursor, letters) = per_entry.remove(0);
             // Rows: spawn rows + journaled mints (idempotent — the
             // base reset makes repeated hydrate() calls safe).
-            let mints = self.journal.mints(&self.name, &id)?;
             self.entries[idx].rows = self.entries[idx].base_rows.clone();
             for m in &mints {
                 self.entries[idx].rows.push(CapRow::new(&m.verb, &m.object));
@@ -1082,17 +1239,6 @@ impl Context {
             // covered prefix would be redundant).
             let fresh = (self.entries[idx].factory)();
             self.entries[idx].actor = Some(fresh);
-            let cursor = self
-                .journal
-                .cursor(&self.name, active, &id)?
-                .unwrap_or(0);
-            let replay_from = self.entries[idx].replay_from;
-            let letters = self
-                .journal
-                .letters_for(&self.name, &id, cursor)?
-                .into_iter()
-                .filter(|env| env.seq >= replay_from)
-                .collect::<Vec<_>>();
             {
                 let Context {
                     name,
@@ -1159,47 +1305,212 @@ impl Context {
     /// Drive the context until no message is deliverable. `max_passes`
     /// bounds livelock (a permanent busy-loop is a bug, and the bound
     /// makes it a visible one).
+    /// ROUND 34 — the durability-drain policy: the overlay lands
+    /// the hot journal's op log on the durable face as ONE
+    /// transaction at `k` ops (and at quiescence). This knob — never
+    /// the exchange count — drives durability IO (fsync/quorum).
+    pub fn max_ops_per_flush(&mut self, k: usize) -> &mut Self {
+        self.max_ops_per_flush = k.max(1);
+        self
+    }
+
+    /// ROUND 34 — the worker pool (§6): `n ≥ 2` runs transitions on
+    /// `n` worker threads (wave dispatch), commits landing in
+    /// dispatch order on the pump thread. 0/1 = the serial pump,
+    /// which stays forever as the deterministic mode (tests, replay
+    /// verification).
+    pub fn workers(&mut self, n: usize) -> &mut Self {
+        self.workers = n;
+        self
+    }
+
     pub fn run_until_idle(&mut self, max_passes: usize) -> PumpStats {
+        if self.workers > 1 {
+            return self.run_until_idle_pool(max_passes);
+        }
         let mut stats = PumpStats::default();
         for _ in 0..max_passes {
-            // Poke poll-affine actors while they hold armed work —
-            // timers fire as messages, never as callbacks (§6). The
-            // poll letters are JOURNALED: on the log tier they replay.
-            let pollers: Vec<usize> = self
-                .entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.actor.as_ref().is_some_and(|a| a.wants_poll()))
-                .map(|(i, _)| i)
-                .collect();
-            for idx in pollers {
-                let poll = Letter::new(
-                    crate::ticker::TIMER_POLL_KIND,
-                    Vec::new(),
-                    None,
-                    None,
-                    Vec::new(),
-                )
-                .expect("fixed kind");
-                let _ = self.journal.commit(
-                    &self.name,
-                    vec![JournalOp::Append(Pending {
-                        letter: poll,
-                        from: Address::Instance(EXTERNAL.into()),
-                        to_actor: self.entries[idx].id.clone(),
-                        to: Address::Instance(self.entries[idx].id.clone()),
-                        ack: None,
-                        producer: EXTERNAL.into(),
-                    })],
-                );
-            }
+            self.inject_polls();
             if self.deliver_one() {
                 stats.passes += 1;
-                self.flush_pending_ops();
+                self.maybe_flush_durability();
             } else {
                 break;
             }
         }
+        // Quiescence: the durability barrier is POLICY-respecting —
+        // the embedding's explicit `flush_durability()` is THE
+        // barrier; tails within the window are the pipelining
+        // exposure (at-least-once redo from the durable point).
+        self.maybe_flush_durability();
         stats
+    }
+
+    /// ROUND 34 — drain the overlay when the hot op log reaches the
+    /// policy threshold. No-op on the RAM tier (no durable face).
+    fn maybe_flush_durability(&mut self) {
+        if self.durable.is_some() && self.journal.unsynced_ops().len() >= self.max_ops_per_flush
+        {
+            let _ = self.flush_durability();
+        }
+    }
+
+    /// ROUND 34 — THE WORKER POOL (§6, round 21's design landed):
+    /// transitions run in parallel on `workers` threads (wave
+    /// dispatch — one letter per actor per wave, the single-cursor
+    /// invariant), and the pump thread is the COMMITTER: results are
+    /// applied strictly in dispatch order, so the journal's total
+    /// order is dispatch order and replay stays deterministic given
+    /// the log ("non-deterministic but recorded"). Phase 2/3/4 — the
+    /// validate/classify/buffer tail — never races: it runs on the
+    /// committer thread. Journal IO follows the flush policy, never
+    /// the exchange count.
+    fn run_until_idle_pool(&mut self, max_passes: usize) -> PumpStats {
+        let mut stats = PumpStats::default();
+        for _ in 0..max_passes {
+            self.inject_polls();
+
+            // Wave composition: round-robin from `next_scan`, one
+            // letter per live actor (single-cursor), up to `workers`
+            // jobs. Terminal entries drain loudly inline.
+            let n = self.entries.len();
+            let mut wave: Vec<(usize, Envelope)> = Vec::new();
+            let mut terminal_drains = 0usize;
+            let mut last_idx: Option<usize> = None;
+            for k in 0..n {
+                let idx = (self.next_scan + k) % n;
+                if self.entries[idx].actor.is_none() {
+                    if self.drain_terminal(idx) {
+                        terminal_drains += 1;
+                        last_idx = Some(idx);
+                    }
+                    continue;
+                }
+                let pending = self
+                    .journal
+                    .pending(&self.name, &self.entries[idx].id)
+                    .unwrap_or_default();
+                if let Some(front) = pending.first() {
+                    wave.push((idx, front.clone()));
+                    last_idx = Some(idx);
+                    if wave.len() >= self.workers {
+                        break;
+                    }
+                }
+            }
+            if let Some(i) = last_idx {
+                self.next_scan = (i + 1) % n;
+            }
+
+            if wave.is_empty() {
+                if terminal_drains > 0 {
+                    stats.passes += terminal_drains;
+                    self.maybe_flush_durability();
+                    continue;
+                }
+                break;
+            }
+
+            stats.passes += wave.len() + terminal_drains;
+            self.run_wave_and_apply(wave);
+            self.maybe_flush_durability();
+        }
+        self.maybe_flush_durability();
+        stats
+    }
+
+    /// Move the wave's actors to workers, run their transitions in
+    /// parallel, then apply the results IN DISPATCH ORDER on this
+    /// (committer) thread.
+    fn run_wave_and_apply(&mut self, wave: Vec<(usize, Envelope)>) {
+        // Stage the jobs: the ORIGINAL actor moves out to the worker;
+        // the pre-receive fork stands in inside the entry (it IS the
+        // rollback state for refusals/crashes).
+        let mut jobs = Vec::with_capacity(wave.len());
+        for (wave_seq, (idx, env)) in wave.iter().enumerate() {
+            let entry = &mut self.entries[*idx];
+            let moved = entry.actor.take().expect("live");
+            // The entry stands EMPTY mid-wave: nothing scans between
+            // composition and apply (the committer thread is the only
+            // scanner, and it is right here). The worker forks the
+            // rollback copy on its own thread.
+            let _ = &entry.id;
+            jobs.push(WaveJob {
+                seq: wave_seq as u64,
+                actor: moved,
+                letter: env.letter.clone(),
+                from: env.from.clone(),
+                rows: entry.rows.clone(),
+                now: self.clock.now_micros(),
+            });
+        }
+
+        let workers = self.workers;
+        let blobs = &*self.blobs;
+        let journal: &dyn JournalFace = &*self.journal;
+        let name: &str = &self.name;
+        let mut results = run_wave(jobs, workers, blobs, journal, name);
+        results.sort_by_key(|r| r.seq);
+
+        // The committer: dispatch order, no concurrency from here on.
+        // Sorted by seq, results align positionally with the wave.
+        for (r, (idx, env)) in results.into_iter().zip(wave) {
+            let WaveOutcome { seq: _, outcome, actor, rollback } = r;
+            match outcome {
+                Ok(effects) => {
+                    if self.land_effects(idx, &env, effects) {
+                        // Mutation kept: the mutated actor returns; the
+                        // worker's rollback copy is dropped.
+                        self.entries[idx].actor = Some(actor);
+                    } else {
+                        // Refused (busy/strike): restore the pre-receive
+                        // copy — the state rolls back to the ack
+                        // boundary.
+                        self.entries[idx].actor = Some(rollback);
+                    }
+                }
+                Err(()) => {
+                    // Crash: restore the pre-receive copy first, then
+                    // supervision decides (restart/fail-fast) — the
+                    // serial path's exact semantics.
+                    self.entries[idx].actor = Some(rollback);
+                    self.handle_crash(idx);
+                }
+            }
+        }
+    }
+
+    /// Poke poll-affine actors while they hold armed work — timers
+    /// fire as messages, never as callbacks (§6). The poll letters
+    /// are JOURNALED: on the log tier they replay.
+    fn inject_polls(&mut self) {
+        let pollers: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.actor.as_ref().is_some_and(|a| a.wants_poll()))
+            .map(|(i, _)| i)
+            .collect();
+        for idx in pollers {
+            let poll = Letter::new(
+                crate::ticker::TIMER_POLL_KIND,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+            )
+            .expect("fixed kind");
+            let _ = self.journal.commit(
+                &self.name,
+                vec![JournalOp::Append(Pending {
+                    letter: poll,
+                    from: Address::Instance(EXTERNAL.into()),
+                    to_actor: self.entries[idx].id.clone(),
+                    to: Address::Instance(self.entries[idx].id.clone()),
+                    ack: None,
+                    producer: EXTERNAL.into(),
+                })],
+            );
+        }
     }
 }

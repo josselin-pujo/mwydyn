@@ -513,4 +513,15 @@ impl JournalFace for InMemoryJournal {
             .cloned()
             .collect())
     }
+
+    // ROUND 34 FIX: the overlay drain reads these through the FACE
+    // (Box<dyn JournalFace>) — the inherent methods alone were never
+    // reachable through the trait object, so flush_durability()
+    // silently drained nothing (the trait defaults returned empty).
+    fn unsynced_ops(&self) -> &[(String, JournalOp)] {
+        InMemoryJournal::unsynced_ops(self)
+    }
+    fn take_ops(&mut self, n: usize) -> Vec<(String, JournalOp)> {
+        InMemoryJournal::take_ops(self, n)
+    }
 }
