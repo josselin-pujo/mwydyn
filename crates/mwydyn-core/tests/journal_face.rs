@@ -4,7 +4,7 @@
 //! and the reason the double implementation cost is worth paying.
 
 use mwydyn_core::journal::{InMemoryJournal, JournalFace, JournalOp, Pending};
-use mwydyn_core::{ClockFace, ManualClock};
+use mwydyn_core::ManualClock;
 use mwydyn_data::{Address, Letter};
 
 #[cfg(feature = "sqlite")]

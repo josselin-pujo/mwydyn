@@ -3,10 +3,14 @@
 //! overhead per letter, excluding fsync).
 
 use mwydyn_core::{Actor, Context, Effect, Host, MsgCtx, Spawn};
-use mwydyn_data::{Address, Letter};
+use mwydyn_data::{Address, DecodeOptions, Letter, Value};
 
 fn addr(context: &str, name: &str) -> Address {
     Address::Named { context: context.into(), name: name.into() }
+}
+
+fn cbor_int(n: i64) -> Vec<u8> {
+    mwydyn_data::encode(&Value::Int(n))
 }
 
 struct Bouncer {
@@ -17,11 +21,10 @@ impl Actor for Bouncer {
         Box::new(Bouncer { target: self.target.clone() })
     }
     fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, letter: &Letter) -> Vec<Effect> {
-        let payload = &letter.payload;
-        if payload.len() < 8 {
-            return vec![];
-        }
-        let count = i64::from_le_bytes(payload[..8].try_into().unwrap());
+        let count = match mwydyn_data::decode(&letter.payload, &DecodeOptions::default()) {
+            Ok(Value::Int(n)) => n,
+            _ => return vec![],
+        };
         if count <= 0 {
             return vec![];
         }
@@ -29,7 +32,7 @@ impl Actor for Bouncer {
             to: self.target.clone(),
             letter: Letter::new(
                 "test.bounce@1",
-                (count - 1).to_le_bytes().to_vec(),
+                cbor_int(count - 1),
                 None,
                 None,
                 vec![],
@@ -58,7 +61,7 @@ fn context_group_commit_throughput() {
 
     let kick = Letter::new(
         "test.bounce@1",
-        n.to_le_bytes().to_vec(),
+        cbor_int(n as i64),
         None,
         None,
         vec![],

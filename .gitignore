@@ -1,2 +1,4 @@
 /target
 .idea
+# Guest build artifacts — rebuild with scripts/build-guest.sh
+crates/mwydyn-wasm/tests/artifacts/

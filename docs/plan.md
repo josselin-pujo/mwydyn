@@ -51,10 +51,16 @@
   the `receive → effects` trait**: the world's exact shape without
   the WASM boundary. Vectors: cbor-profile (ported from A1),
   schema-registry, letter→verdict, receive-purity.
-- **M1 — wasmtime guests.** world-v0.wit bound for real; decode at
-  the barrier; epoch/fuel budgets; a toy echo actor in
-  Rust-compiled WASM, then a TS guest (component tooling check).
-  Same vectors, plus cross-boundary purity vectors.
+- **M1 — wasmtime guests.** ~~world-v0.wit bound for real~~
+  SUPERSEDED (round 33): the component model is gone — CBOR all
+  the way, plain `wasm32-unknown-unknown` guests, zero imports,
+  barrier contract in `mwydyn-data/src/barrier.rs`. Landed: the
+  barrier (request/response + payload wall), the container, the
+  guest-minimal work-order transform, byzantine-crash proof,
+  CBOR-tier throughput. Remaining: epoch/fuel budgets armed per
+  exchange (executor round); barrier conformance vectors; the
+  ambient host-face import surface (blob_get etc. across the
+  barrier).
 - **M2 — log tier.** The context journal: contiguous `seq`,
   per-message checksums, cursor-over-journal inboxes, journaled
   ticks, rewind — the time-travel layer's first mechanical form.

@@ -37,49 +37,7 @@ fn wasm_ping_pong_raw_floor() {
     assert!(calls_per_sec > 100_000.0, "wasmtime calls should be >100k/s");
 }
 
-/// The component-model test: load the compiled WASM guest component
-/// and call its process function through wasmtime's component API.
-/// This proves the WASM execution realm works end to end.
-#[test]
-#[cfg_attr(target_os = "windows", ignore = "wasmtime 26 Windows: component model calls abort (__fastfail) instead of returning Err(Trap) — needs Linux CI or wasmtime fix")]
-fn component_model_instantiates_and_calls() {
-    use wasmtime::component::{Component, Linker};
-    use wasmtime::{Config, Engine as WtEngine, Store as WtStore};
-
-    // Build the minimal guest component.
-    let guest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/wasm32-wasip2/release/mwydyn_guest_minimal.wasm");
-    // Compile from WAT if the binary doesn't exist (first build).
-    if !guest_path.exists() {
-        panic!(
-            "guest WASM not found at {}. Run: cargo build -p mwydyn-guest-minimal --target wasm32-wasip2 --release",
-            guest_path.display()
-        );
-    }
-
-    let mut config = Config::new();
-    config.wasm_component_model(true);
-    let engine = WtEngine::new(&config).unwrap();
-    let component = Component::from_file(&engine, &guest_path).unwrap();
-
-    let mut store = WtStore::new(&engine, ());
-    let mut linker = Linker::new(&engine);
-    // No imports needed for the minimal world.
-    let instance = linker.instantiate(&mut store, &component).unwrap();
-
-    // Get the process function: WIT s64 maps to Rust i64.
-    let process = instance
-        .get_func(&mut store, "process")
-        .expect("process export");
-    let process = process.typed::<(i64,), (i64,)>(&mut store).unwrap();
-
-    // Call: process(42) → 41 (decrement).
-    let (result,) = process.call(&mut store, (42,)).unwrap();
-    assert_eq!(result, 41, "process(42) should return 41 (decrement)");
-
-    // Call: process(0) → -1.
-    let (result,) = process.call(&mut store, (0,)).unwrap();
-    assert_eq!(result, -1);
-
-    eprintln!("component-model: instantiation + calling works ✓");
-}
+// The component-model test is GONE (round 33): CBOR all the way —
+// the component model is no longer part of the container, and the
+// Windows __fastfail epoch-trap limitation died with it. The real
+// guest now runs through the barrier ABI (tests/barrier.rs).

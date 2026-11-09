@@ -76,6 +76,28 @@ wasmtime Store + Instance + TypedFunc; ping/pong through Context
 pump at 3434 bounces/s (5000 bounces, 2 WASM actors, RAM tier);
 WASM execution is NOT the bottleneck — the framework per-letter
 cost dominates; WASM floor: 1.4M calls/s raw wasmtime.
+**ROUND 33: CBOR ALL THE WAY — WIT IS DEAD** (work-notes/32):
+canonical CBOR bytes ARE the WASM ABI; no component model, no WIT
+(`wasmtime = "26"` lean, engine.rs deleted, Windows __fastfail
+limitation died with it). The barrier contract lives in
+[mwydyn-data/src/barrier.rs](crates/mwydyn-data/src/barrier.rs):
+request `{"from","letter","v"}` / response
+`[{"post":{"to","letter"}}]`, `alloc`/`dealloc`/
+`process(ptr,len)→[u32 len][bytes]`; guests compile to plain
+wasm32-unknown-unknown with ZERO imports (no WASI, nothing to
+fake); guest-side codec IS mwydyn-data (one canon, both realms).
+**THE PAYLOAD WALL**: non-canonical payload bytes refused at
+`post` and in deliver Phase 2 — native and WASM identically; zero
+bytes are NOT a payload (use Null/0xF6); the journal never stores
+undecodable payloads. `mwydyn-guest-minimal` = the real guest
+(work-order transform: totals items, stamps hops, reply-rides-from
+after the first hop, reports OUT to the external outbox at budget);
+rebuild via `scripts/build-guest.sh` (artifact gitignored, tests
+skip-with-message if absent). Byzantine proof: garbage guest
+responses are CRASHES through the real strike path, never silent
+swallows. CBOR-tier throughput ~330 hops/s (growing tree +
+re-instantiate-per-fork are the costs; §7.6 snapshots are the fix).
+All suites green, clippy clean workspace-wide.
 **`mwydyn-core` RUNS** (work-notes/15): native
 actors over `receive(ctx, host, letter) → effects` (MsgCtx = runtime-
 minted from, read-only); four-phase effects engine (transition →

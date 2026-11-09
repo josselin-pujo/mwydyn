@@ -4,8 +4,12 @@
 //! effects marshaling) vs. the raw wasmtime floor.
 
 use mwydyn_core::{Actor, Context, Effect, Host, MsgCtx, Spawn};
-use mwydyn_data::{Address, Letter};
+use mwydyn_data::{decode, encode, Address, DecodeOptions, Letter, Value};
 use wasmtime::{Engine, Instance, Module, Store, TypedFunc};
+
+fn cbor_int(n: i64) -> Vec<u8> {
+    encode(&Value::Int(n))
+}
 
 const DECREMENT_WAT: &str = r#"
     (module
@@ -55,25 +59,19 @@ impl Actor for WasmBouncer {
     }
 
     fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, letter: &Letter) -> Vec<Effect> {
-        let payload = &letter.payload;
-        if payload.len() < 8 {
-            return vec![];
-        }
-        let count = i64::from_le_bytes(payload[..8].try_into().unwrap());
+        // Round 33: the payload wall — payloads are canonical CBOR.
+        let count = match decode(&letter.payload, &DecodeOptions::default()) {
+            Ok(Value::Int(n)) => n,
+            _ => return vec![],
+        };
         let new_count = self
             .process_fn
             .call(&mut self.store, count)
             .unwrap_or_else(|e| panic!("WASM trap in process_fn: {e}"));
         vec![Effect::Post {
             to: self.target.clone(),
-            letter: Letter::new(
-                "test.bounce@1",
-                new_count.to_le_bytes().to_vec(),
-                None,
-                None,
-                vec![],
-            )
-            .unwrap(),
+            letter: Letter::new("test.bounce@1", cbor_int(new_count), None, None, vec![])
+                .unwrap(),
         }]
     }
 }
@@ -145,7 +143,7 @@ fn wasm_ping_pong_pipeline_throughput() {
     // Post the initial letter to ping with the starting count.
     let kick = Letter::new(
         "test.bounce@1",
-        n.to_le_bytes().to_vec(),
+        cbor_int(n as i64),
         None,
         None,
         vec![],

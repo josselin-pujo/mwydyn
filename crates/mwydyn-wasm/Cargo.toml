@@ -7,6 +7,8 @@ edition.workspace = true
 anyhow = "1"
 mwydyn-data = { path = "../mwydyn-data" }
 mwydyn-core = { path = "../mwydyn-core" }
-wasmtime = { version = "26", features = ["component-model", "runtime"] }
+# Round 33: CBOR all the way — the component model is gone; plain
+# core modules over linear memory (wasm32-unknown-unknown guests).
+wasmtime = "26"
 
 [dev-dependencies]

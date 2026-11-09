@@ -355,6 +355,25 @@ ceremony without payoff.
   that cannot cross threads is not a real provider), `Actor: Send`
   (no `Rc` in actor state, by contract), `ClockFace: Send+Sync`,
   blob store `Mutex`.
+- **The WASM barrier [DECIDED, round 33]**: canonical CBOR bytes
+  are the WASM ABI — `Value`-in-memory never crosses a boundary,
+  the same law the journal runs (journal ⇄ wire ⇄ barrier: one
+  canon). No WIT, no component model: "enforced external CBOR
+  envelope types" replace the interface layer — request
+  `{"from", "letter", "v"}`, response `[{"post": {"to", "letter"}}]`,
+  decoded through the canonical profile at the wall both ways
+  (`mwydyn-data/src/barrier.rs` is the contract; conformance
+  vectors apply at the barrier too). The guest-side codec IS
+  mwydyn-data (one definition, both realms). ABI mechanics:
+  `alloc`/`dealloc`/`process(ptr,len)→[u32 len][bytes]` over plain
+  `wasm32-unknown-unknown` — guests have ZERO imports (no WASI,
+  nothing to fake). Every violation is a guest CRASH (trap, garbage
+  bytes, bad shape), classified by supervision — never a silent
+  swallow. **THE PAYLOAD WALL**: non-canonical payload bytes are
+  refused at admission (`post`) and in the effects phase — native
+  and WASM identically; the journal never stores undecodable
+  payloads. Payloads are canonical CBOR *always*; a letter carrying
+  nothing uses `Null` (0xF6), not zero bytes.
 - Runtime: **wasmtime**. Budget knobs proven in A1's spike [A1:40]:
   epoch-interrupt wall clock, memory limiter, optional fuel.
 - Stateful actors choose:

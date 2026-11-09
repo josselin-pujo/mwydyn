@@ -10,7 +10,14 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use mwydyn_data::{Address, Envelope, Letter, Value};
+use mwydyn_data::{Address, DecodeOptions, Envelope, Letter, Value};
+
+/// THE PAYLOAD WALL (round 33): a payload is canonical CBOR or it is
+/// not admitted. Same gate at `post` (embedding) and in Phase 2 of
+/// `deliver` (effects, native or WASM) — compose-parity at the gate.
+fn payload_canonical(bytes: &[u8]) -> bool {
+    mwydyn_data::decode(bytes, &DecodeOptions::default()).is_ok()
+}
 
 use crate::actor::{Actor, CapRow, Effect, Host, Level, MsgCtx};
 use crate::blob::{BlobFace, BlobRef, RamBlobStore};
@@ -529,7 +536,7 @@ impl Context {
     pub fn post(&mut self, to: &Address, letter: Letter, authority: Vec<String>) -> Verdict {
         let mut letter = letter;
         letter.authority = authority;
-        if letter.validate().is_err() {
+        if letter.validate().is_err() || !payload_canonical(&letter.payload) {
             return Verdict::Refused(RefuseReason::Invalid);
         }
         let Some(idx) = self.resolve(to) else {
@@ -708,6 +715,14 @@ impl Context {
                 Effect::Post { to, letter } => {
                     if letter.validate().is_err() {
                         block = Some(Block::Strike("invalid letter in effects"));
+                        break;
+                    }
+                    // THE PAYLOAD WALL (round 33): payloads are
+                    // canonical CBOR, whatever realm produced them —
+                    // the journal never stores undecodable bytes, so
+                    // GC/snapshot/replay can always walk a payload.
+                    if !payload_canonical(&letter.payload) {
+                        block = Some(Block::Strike("non-canonical payload in effects"));
                         break;
                     }
                     if Self::is_external(to) {

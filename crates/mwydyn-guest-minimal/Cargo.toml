@@ -4,8 +4,12 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# The guest compiles to plain wasm32-unknown-unknown with ZERO
+# imports — no WASI, nothing to fake (round 33: CBOR all the way).
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.63"
+# The guest-side codec IS mwydyn-data: one canonical-CBOR definition,
+# both realms — compose-parity down to the wire format.
+mwydyn-data = { path = "../mwydyn-data" }

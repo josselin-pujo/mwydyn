@@ -95,12 +95,16 @@ impl Actor for Ticker {
                     .schedule
                     .extract_if(.., |s| s.fire_at_micros <= now)
                     .collect();
+                // The tick payload is canonical CBOR `{"firedAtUs": <int>}`
+                // — the payload wall (round 33) admits nothing else.
+                let fired_at = Value::map(vec![("firedAtUs".into(), Value::Int(now))])
+                    .expect("fixed key");
                 due.into_iter()
                     .map(|s| Effect::Post {
                         to: s.to,
                         letter: Letter::new(
                             TIMER_TICK_KIND,
-                            Vec::new(),
+                            mwydyn_data::encode(&fired_at),
                             None,
                             s.correlation,
                             Vec::new(),

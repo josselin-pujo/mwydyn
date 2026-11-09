@@ -18,6 +18,21 @@ fn addr(context: &str, name: &str) -> Address {
     }
 }
 
+// Round 33: payloads are canonical CBOR — the wall refuses anything
+// else. Test letters ride these helpers.
+fn txt(s: &str) -> Vec<u8> {
+    mwydyn_data::encode(&Value::Text(s.into()))
+}
+fn nul() -> Vec<u8> {
+    mwydyn_data::encode(&Value::Null)
+}
+fn payload_text(bytes: &[u8]) -> String {
+    match mwydyn_data::decode(bytes, &DecodeOptions::default()) {
+        Ok(Value::Text(s)) => s,
+        _ => "<non-text>".into(),
+    }
+}
+
 #[derive(Clone)]
 struct Collector {
     tag: String,
@@ -34,7 +49,7 @@ impl Actor for Collector {
                 "{}:{}:{}",
                 self.tag,
                 letter.kind,
-                String::from_utf8_lossy(&letter.payload)
+                payload_text(&letter.payload)
             ),
         }]
     }
@@ -70,7 +85,7 @@ fn admission_verdicts() {
         Box::new(|| Box::new(Collector { tag: "s".into() })),
     ))
     .unwrap();
-    let l = Letter::new("test.x@1", vec![], None, None, vec![]).unwrap();
+    let l = Letter::new("test.x@1", nul(), None, None, vec![]).unwrap();
 
     assert_eq!(
         ctx.post(&addr("c1", "nope"), l.clone(), vec![]),
@@ -87,6 +102,15 @@ fn admission_verdicts() {
     raw.kind = "nope".into();
     assert_eq!(
         ctx.post(&addr("c1", "sink"), raw, vec![]),
+        Verdict::Refused(RefuseReason::Invalid)
+    );
+    // THE PAYLOAD WALL (round 33): non-canonical payload bytes are
+    // refused at admission — the journal never stores undecodable
+    // payloads, whatever realm produced them.
+    let mut garbage = l.clone();
+    garbage.payload = vec![0xFF, 0x00];
+    assert_eq!(
+        ctx.post(&addr("c1", "sink"), garbage, vec![]),
         Verdict::Refused(RefuseReason::Invalid)
     );
 
@@ -115,13 +139,13 @@ fn replies_to_external_land_in_the_drainable_outbox() {
         .unwrap();
     // Echo replies to `from` — external now HAS an inbox: the
     // embedding's drainable outbox (§3.4's handle mechanism).
-    let l = Letter::new("test.hi@1", b"yo".to_vec(), None, Some("c1".into()), vec![]).unwrap();
+    let l = Letter::new("test.hi@1", txt("yo"), None, Some("c1".into()), vec![]).unwrap();
     ctx.post(&addr("c1", "echo"), l, vec![]);
     ctx.run_until_idle(50);
     let replies = ctx.drain_external();
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0].letter.kind, "test.echo.reply@1");
-    assert_eq!(replies[0].letter.payload, b"yo");
+    assert_eq!(replies[0].letter.payload, txt("yo"));
     assert_eq!(replies[0].letter.correlation.as_deref(), Some("c1"));
     assert!(ctx.drain_external().is_empty(), "drain drains");
     assert!(ctx.dead_letters().is_empty());
@@ -144,7 +168,7 @@ impl Actor for Forward {
                 to: self.target.clone(),
                 letter: Letter::new(
                     "test.ping@1",
-                    b"ping".to_vec(),
+                    txt("ping"),
                     None,
                     Some("c2".into()),
                     vec![],
@@ -173,7 +197,7 @@ fn multi_hop_reply_rides_from() {
         })),
     ))
     .unwrap();
-    let l = Letter::new("test.go@1", b"go".to_vec(), None, None, vec![]).unwrap();
+    let l = Letter::new("test.go@1", txt("go"), None, None, vec![]).unwrap();
     ctx.post(&addr("c1", "fwd"), l, vec![]);
     ctx.run_until_idle(50);
     // fwd → echo (from = fwd's instance) → echo replies to from →
@@ -195,7 +219,7 @@ impl Actor for Doubler {
         Box::new(self.clone())
     }
     fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, _letter: &Letter) -> Vec<Effect> {
-        let mk = || Letter::new("test.d@1", b"x".to_vec(), None, None, vec![]).unwrap();
+        let mk = || Letter::new("test.d@1", txt("x"), None, None, vec![]).unwrap();
         vec![
             Effect::Post {
                 to: self.target.clone(),
@@ -233,10 +257,10 @@ fn effect_busy_requeues_without_burning_attempts() {
     // Pre-load the sink to one-under-bound: the doubler's second
     // effect cannot fit, so the WHOLE list is refused busy.
     for _ in 0..2 {
-        let l = Letter::new("test.pre@1", b"p".to_vec(), None, None, vec![]).unwrap();
+        let l = Letter::new("test.pre@1", txt("p"), None, None, vec![]).unwrap();
         ctx.post(&addr("c1", "sink"), l, vec![]);
     }
-    let second = Letter::new("test.go@1", b"g".to_vec(), None, None, vec![]).unwrap();
+    let second = Letter::new("test.go@1", txt("g"), None, None, vec![]).unwrap();
     ctx.post(&addr("c1", "dbl"), second, vec![]);
     ctx.run_until_idle(50);
     // The busy refusal requeued the letter, no attempt burned, and
@@ -262,12 +286,12 @@ impl Actor for Panicky {
         Box::new(self.clone())
     }
     fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, letter: &Letter) -> Vec<Effect> {
-        if letter.payload == b"boom" {
+        if letter.payload == txt("boom") {
             panic!("synthetic boom");
         }
         vec![Effect::Emit {
             level: Level::Info,
-            message: format!("ok:{}", String::from_utf8_lossy(&letter.payload)),
+            message: format!("ok:{}", payload_text(&letter.payload)),
         }]
     }
 }
@@ -289,7 +313,7 @@ fn restart_supervision_reinstates_and_dead_letters_poison() {
     for payload in ["boom", "fine"] {
         let l = Letter::new(
             "test.p@1",
-            payload.as_bytes().to_vec(),
+            txt(payload),
             None,
             None,
             vec![],
@@ -301,7 +325,7 @@ fn restart_supervision_reinstates_and_dead_letters_poison() {
     // Three strikes on the poison letter → dead-letter; the fresh
     // instance processes `fine`.
     assert_eq!(ctx.dead_letters().len(), 1);
-    assert_eq!(ctx.dead_letters()[0].letter.payload, b"boom");
+    assert_eq!(ctx.dead_letters()[0].letter.payload, txt("boom"));
     assert!(ctx.telemetry().iter().any(|(_, m)| m == "ok:fine"));
     assert!(ctx.telemetry().iter().any(|(_, m)| m.contains("restarted fresh")));
 }
@@ -313,7 +337,7 @@ fn fail_fast_is_terminal_and_drains_pending() {
     for payload in ["boom", "fine"] {
         let l = Letter::new(
             "test.p@1",
-            payload.as_bytes().to_vec(),
+            txt(payload),
             None,
             None,
             vec![],
@@ -377,7 +401,7 @@ fn ticker_fires_ticks_as_messages_on_the_injected_clock() {
         })),
     ))
     .unwrap();
-    let l = Letter::new("test.go@1", vec![], None, None, vec![]).unwrap();
+    let l = Letter::new("test.go@1", nul(), None, None, vec![]).unwrap();
     ctx.post(&addr("c1", "armer"), l, vec![]);
     ctx.run_until_idle(50);
     assert!(
@@ -489,7 +513,7 @@ fn blob_ref_in_hand_put_then_post_then_read() {
         .rows(vec![CapRow::new("blob.read", "*")]),
     )
     .unwrap();
-    let w = Letter::new("test.publish@1", vec![], None, None, vec![]).unwrap();
+    let w = Letter::new("test.publish@1", nul(), None, None, vec![]).unwrap();
     ctx.post(&addr("c1", "pub"), w, vec![]);
     ctx.run_until_idle(50);
     // Publisher eagerly put (blob.write), posted the ref, the reader
@@ -503,7 +527,7 @@ fn blob_ref_in_hand_put_then_post_then_read() {
     // receive, proving: no full fetch needed, end clamped.
     #[derive(Clone)]
 struct RangePublisher {
-        reader: Address,
+        _reader: Address,
     }
     impl Actor for RangePublisher {
     fn fork(&self) -> Box<dyn Actor> {
@@ -547,13 +571,13 @@ struct RangePublisher {
         Spawn::new(
             Some("rp"),
             Box::new(|| Box::new(RangePublisher {
-                reader: addr("c1", "blob"),
+                _reader: addr("c1", "blob"),
             })),
         )
         .rows(vec![CapRow::new("blob.read", "*"), CapRow::new("blob.write", "*")]),
     )
     .unwrap();
-    let rl = Letter::new("test.range@1", vec![], None, None, vec![]).unwrap();
+    let rl = Letter::new("test.range@1", nul(), None, None, vec![]).unwrap();
     ctx.post(&addr("c1", "rp"), rl, vec![]);
     ctx.run_until_idle(50);
     assert!(ctx.telemetry().iter().any(|(_, m)| m == "RANGE:456789"));
@@ -598,8 +622,7 @@ struct EagerPutter;
                 // a NONEXISTENT instance — the strike path this test
                 // exercises (external now lands in the outbox).
                 to: Address::Instance("ins-999".into()),
-                letter: Letter::new("test.ref@1", r.digest.into_bytes(), None, None, vec![])
-                    .unwrap(),
+                letter: Letter::new("test.ref@1", txt(&r.digest), None, None, vec![]).unwrap(),
             }]
         }
     }
@@ -609,7 +632,7 @@ struct EagerPutter;
             .rows(vec![CapRow::new("blob.write", "*")]),
     )
     .unwrap();
-    let l = Letter::new("test.go@1", vec![], None, None, vec![]).unwrap();
+    let l = Letter::new("test.go@1", nul(), None, None, vec![]).unwrap();
     ctx.post(&addr("c1", "atomic"), l, vec![]);
     ctx.run_until_idle(50);
     // The observable transaction held: the letter struck out, no
@@ -625,32 +648,6 @@ struct EagerPutter;
 
 #[test]
 fn mint_requires_the_source_row() {
-    #[derive(Clone)]
-struct Minter;
-    impl Actor for Minter {
-    fn fork(&self) -> Box<dyn Actor> {
-        Box::new(self.clone())
-    }
-        fn receive(&mut self, _ctx: &MsgCtx, host: &Host, letter: &Letter) -> Vec<Effect> {
-            match letter.kind.as_str() {
-                "test.mint@1" => vec![Effect::Mint {
-                    source_verb: "role.write".into(),
-                    source_object: "obj1".into(),
-                    verb: "role.read".into(),
-                    object: "obj1".into(),
-                }],
-                "test.caps@1" => {
-                    let names: Vec<String> =
-                        host.caps().iter().map(|r| r.verb.clone()).collect();
-                    vec![Effect::Emit {
-                        level: Level::Info,
-                        message: format!("CAPS:{}", names.join(",")),
-                    }]
-                }
-                _ => vec![],
-            }
-        }
-    }
     let mut ctx = Context::new("c1");
     ctx.spawn(
         Spawn::new(Some("mint"), Box::new(|| Box::new(HydrationMinter)))
@@ -662,9 +659,9 @@ struct Minter;
     // (The seed row is role.write/obj1; the letter names a source the
     // actor does not hold by mutating the effect through a variant.)
     // Simplest honest test: mint succeeds when held, and caps-lists it.
-    let l = Letter::new("test.mint@1", vec![], None, None, vec![]).unwrap();
+    let l = Letter::new("test.mint@1", nul(), None, None, vec![]).unwrap();
     ctx.post(&addr("c1", "mint"), l, vec![]);
-    let caps = Letter::new("test.caps@1", vec![], None, None, vec![]).unwrap();
+    let caps = Letter::new("test.caps@1", nul(), None, None, vec![]).unwrap();
     ctx.post(&addr("c1", "mint"), caps, vec![]);
     ctx.run_until_idle(50);
     assert!(ctx.telemetry().iter().any(|(_, m)| m == "CAPS:role.write,role.read"),
@@ -679,11 +676,12 @@ impl Actor for Upper {
         Box::new(self.clone())
     }
     fn receive(&mut self, ctx: &MsgCtx, _host: &Host, letter: &Letter) -> Vec<Effect> {
+        let upper = payload_text(&letter.payload).to_ascii_uppercase();
         vec![Effect::Post {
             to: ctx.from.clone(),
             letter: Letter::new(
                 "upper.reply@1",
-                letter.payload.to_ascii_uppercase(),
+                txt(&upper),
                 None,
                 letter.correlation.clone(),
                 vec![],
@@ -696,13 +694,13 @@ impl Actor for Upper {
 #[test]
 fn call_task_is_a_one_call_round_trip() {
     let mut ctx = Context::new("c1");
-    let req = Letter::new("upper.request@1", b"hello".to_vec(), None, None, vec![]).unwrap();
+    let req = Letter::new("upper.request@1", txt("hello"), None, None, vec![]).unwrap();
     let reply = ctx
         .call_task(Box::new(|| Box::new(Upper)), req)
         .unwrap()
         .expect("the reply arrived in the external outbox");
     assert_eq!(reply.kind, "upper.reply@1");
-    assert_eq!(reply.payload, b"HELLO");
+    assert_eq!(reply.payload, txt("HELLO"));
     let corr = reply.correlation.expect("reply echoes the minted correlation");
     assert!(corr.starts_with("call-"));
     // Outbox drained of the matched reply; nothing else was pending.
@@ -754,9 +752,9 @@ fn hydration_rebuilds_rows_and_ticker_schedules() {
         .supervision(Supervision::Restart),
     )
     .unwrap();
-    let mint = Letter::new("test.mint@1", vec![], None, None, vec![]).unwrap();
+    let mint = Letter::new("test.mint@1", nul(), None, None, vec![]).unwrap();
     ctx1.post(&addr("c1", "mint"), mint, vec![]);
-    let go = Letter::new("test.go@1", vec![], None, None, vec![]).unwrap();
+    let go = Letter::new("test.go@1", nul(), None, None, vec![]).unwrap();
     ctx1.post(&addr("c1", "armer"), go, vec![]);
     ctx1.run_until_idle(50);
     drop(ctx1);
@@ -783,7 +781,7 @@ fn hydration_rebuilds_rows_and_ticker_schedules() {
     assert!(replays >= 3, "ticker + minter + armer replays: {replays}");
 
     // The mint fact hydrated into the grant set (base row + mint).
-    let caps = Letter::new("test.caps@1", vec![], None, None, vec![]).unwrap();
+    let caps = Letter::new("test.caps@1", nul(), None, None, vec![]).unwrap();
     ctx2.post(&addr("c1", "mint"), caps, vec![]);
     ctx2.run_until_idle(50);
     assert!(ctx2
@@ -822,10 +820,10 @@ fn durable_context_survives_reopen() {
     );
     ctx1.spawn(Spawn::new(Some("echo"), Box::new(|| Box::new(Echo))))
         .unwrap();
-    let m1 = Letter::new("test.d@1", b"m1".to_vec(), None, Some("r1".into()), vec![]).unwrap();
+    let m1 = Letter::new("test.d@1", txt("m1"), None, Some("r1".into()), vec![]).unwrap();
     ctx1.post(&addr("c1", "echo"), m1, vec![]);
     ctx1.run_until_idle(50); // m1 delivered + replied (reply lost with ctx1's outbox view)
-    let m2 = Letter::new("test.d@1", b"m2".to_vec(), None, Some("r2".into()), vec![]).unwrap();
+    let m2 = Letter::new("test.d@1", txt("m2"), None, Some("r2".into()), vec![]).unwrap();
     ctx1.post(&addr("c1", "echo"), m2, vec![]);
     // m2 stays PENDING — never delivered. ctx1 dies here.
     drop(ctx1);
@@ -839,7 +837,7 @@ fn durable_context_survives_reopen() {
     ctx2.hydrate().expect("hydrate");
 
     // m2 is still pending — exactly-once delivery from the journal.
-    let m3 = Letter::new("test.d@1", b"m3".to_vec(), None, Some("r3".into()), vec![]).unwrap();
+    let m3 = Letter::new("test.d@1", txt("m3"), None, Some("r3".into()), vec![]).unwrap();
     ctx2.post(&addr("c1", "echo"), m3, vec![]);
     ctx2.run_until_idle(50);
     let replies = ctx2.drain_external();
@@ -848,9 +846,9 @@ fn durable_context_survives_reopen() {
         .map(|e| e.letter.payload.clone())
         .collect();
     payloads.sort();
-    assert_eq!(payloads, vec![b"m2".to_vec(), b"m3".to_vec()]);
+    assert_eq!(payloads, vec![txt("m2"), txt("m3")]);
     assert!(
-        !payloads.contains(&b"m1".to_vec()),
+        !payloads.contains(&txt("m1")),
         "m1 was already delivered in ctx1 — no double delivery"
     );
     let _ = std::fs::remove_file(&path);
@@ -886,7 +884,7 @@ impl Actor for GhostProbe {
                 .iter()
                 .map(|e| Effect::Emit {
                     level: Level::Info,
-                    message: format!("GHOST:{}", String::from_utf8_lossy(&e.letter.payload)),
+                    message: format!("GHOST:{}", payload_text(&e.letter.payload)),
                 })
                 .collect(),
             Err(e) => vec![Effect::Emit {
@@ -966,7 +964,7 @@ fn rewind_forks_a_readable_ghost_branch_behind_the_gate() {
 
     // Two notes land on lineage 1 (seqs 1, 2), delivered to probe-all.
     for payload in ["note-1", "note-2"] {
-        let l = Letter::new("test.note@1", payload.as_bytes().to_vec(), None, None, vec![]).unwrap();
+        let l = Letter::new("test.note@1", txt(payload), None, None, vec![]).unwrap();
         ctx.post(&addr("c1", "probe-all"), l, vec![]);
     }
     ctx.run_until_idle(50);
@@ -975,7 +973,7 @@ fn rewind_forks_a_readable_ghost_branch_behind_the_gate() {
     // reality; actors restart fresh.
     let new_lineage = ctx.rewind(1).expect("rewind forks");
     assert_eq!(new_lineage, 2);
-    let lins = {
+    {
         // lineages are observable through a fresh probe's ghost read
         // of lineage 1's SHARED prefix — this also proves the prefix
         // survives the fork for granted readers.
@@ -1122,7 +1120,7 @@ struct PublishTwo {
         .rows(vec![CapRow::new("blob.write", "*")]),
     )
     .unwrap();
-    let l = Letter::new("test.put@1", vec![], None, None, vec![]).unwrap();
+    let l = Letter::new("test.put@1", nul(), None, None, vec![]).unwrap();
     ctx.post(&addr("c1", "pub"), l, vec![]);
     ctx.run_until_idle(50);
     assert_eq!(ctx.blob_count(), 2, "pre-GC: both allocations exist");
@@ -1223,7 +1221,7 @@ struct GhostPutter {
             .rows(vec![CapRow::new("blob.write", "*")]),
         )
         .unwrap();
-        let l = Letter::new("test.put@1", vec![], None, None, vec![]).unwrap();
+        let l = Letter::new("test.put@1", nul(), None, None, vec![]).unwrap();
         ctx.post(&addr("c1", "gp"), l, vec![]);
         ctx.run_until_idle(50);
         ctx.rewind(1).expect("rewind orphans the ghost-ref letter");
@@ -1257,7 +1255,7 @@ struct GhostPutter {
 #[derive(Clone)]
 struct StatefulCounter {
     count: u64,
-    snapshots: Address,
+    _snapshots: Address,
 }
 
 impl Actor for StatefulCounter {
@@ -1280,10 +1278,7 @@ impl Actor for StatefulCounter {
     fn receive(&mut self, _ctx: &MsgCtx, host: &Host, letter: &Letter) -> Vec<Effect> {
         match letter.kind.as_str() {
             "test.add@1" => {
-                let add: u64 = std::str::from_utf8(&letter.payload)
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
+                let add: u64 = payload_text(&letter.payload).parse().unwrap_or(0);
                 self.count += add;
                 vec![Effect::Emit {
                     level: Level::Info,
@@ -1355,7 +1350,7 @@ fn snapshot_letter_survives_reopen_and_restores_state_and_cursor() {
                 Box::new(|| {
                     Box::new(StatefulCounter {
                         count: 0,
-                        snapshots: addr("c1", mwydyn_core::SNAPSHOTS),
+                        _snapshots: addr("c1", mwydyn_core::SNAPSHOTS),
                     })
                 }),
             )
@@ -1374,14 +1369,14 @@ fn snapshot_letter_survives_reopen_and_restores_state_and_cursor() {
         );
         spawn_counter(&mut ctx);
         for n in ["1", "2"] {
-            let l = Letter::new("test.add@1", n.as_bytes().to_vec(), None, None, vec![]).unwrap();
+            let l = Letter::new("test.add@1", txt(n), None, None, vec![]).unwrap();
             ctx.post(&addr("c1", "counter"), l, vec![]);
         }
         ctx.run_until_idle(50);
-        let snap_req = Letter::new("test.snap@1", vec![], None, None, vec![]).unwrap();
+        let snap_req = Letter::new("test.snap@1", nul(), None, None, vec![]).unwrap();
         ctx.post(&addr("c1", "counter"), snap_req, vec![]);
         ctx.run_until_idle(50);
-        let l = Letter::new("test.add@1", b"3".to_vec(), None, None, vec![]).unwrap();
+        let l = Letter::new("test.add@1", txt("3"), None, None, vec![]).unwrap();
         ctx.post(&addr("c1", "counter"), l, vec![]);
         drop(ctx);
     }
@@ -1405,10 +1400,10 @@ fn snapshot_letter_survives_reopen_and_restores_state_and_cursor() {
     let _ = std::fs::remove_file(journal_path.with_extension("sqlite-shm"));
 }
 
-/// Round 31 perf: ping/pong with two native actors, measuring
-/// letters/second through the full pump (transition + fork/rollback
-/// + journal commit). The baseline for the WASM and executor
-/// throughput measurements.
+/// Round 31 perf: ping/pong with two native actors, measuring the
+/// letters-per-second rate through the full pump (transition +
+/// fork/rollback + journal commit). The baseline for the WASM and
+/// executor throughput measurements.
 #[test]
 fn perf_ping_pong_baseline() {
     use std::time::Instant;
@@ -1445,14 +1440,14 @@ struct Ping {
         Box::new(self.clone())
     }
 
-        fn receive(&mut self, ctx: &MsgCtx, _host: &Host, letter: &Letter) -> Vec<Effect> {
+        fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, _letter: &Letter) -> Vec<Effect> {
             if self.remaining > 0 {
                 self.remaining -= 1;
                 vec![Effect::Post {
                     to: self.pong.clone(),
                     letter: Letter::new(
                         "test.ping@1",
-                        b"ping".to_vec(),
+                        txt("ping"),
                         None,
                         None,
                         vec![],
@@ -1490,7 +1485,7 @@ struct Ping {
 
     let start = Instant::now();
     // Kick off: spawner posts the first ping to ping.
-    let l = Letter::new("test.kick@1", b"start".to_vec(), None, None, vec![]).unwrap();
+    let l = Letter::new("test.kick@1", txt("start"), None, None, vec![]).unwrap();
     ctx.post(
         &Address::Named {
             context: "perf".into(),

@@ -74,7 +74,99 @@ pub enum EnvelopeError {
     BadForm(&'static str),
 }
 
+/// The canonical data-model form of an address — shared by the
+/// envelope and the WASM barrier (round 33: the barrier speaks the
+/// same vocabulary as the journal, never a second canon).
+pub fn address_to_value(a: &Address) -> Value {
+    match a {
+        Address::Named { context, name } => Value::map(vec![
+            ("name".into(), Value::Text(name.clone())),
+            ("context".into(), Value::Text(context.clone())),
+        ])
+        .expect("fixed hygienic keys"),
+        Address::Instance(id) => Value::Text(id.clone()),
+    }
+}
+
+/// The inverse of [`address_to_value`]. Shape-validated; canonical
+/// key order (`name` < `context`) is the accepted spelling.
+pub fn address_from_value(v: &Value) -> Option<Address> {
+    match v {
+        Value::Text(s) => Some(Address::Instance(s.clone())),
+        // canonical key order: "name"(4) < "context"(7)
+        Value::Map(p) if p.len() == 2 && p[0].0 == "name" && p[1].0 == "context" => Some(
+            Address::Named {
+                name: p[0].1.as_text()?.to_string(),
+                context: p[1].1.as_text()?.to_string(),
+            },
+        ),
+        _ => None,
+    }
+}
+
 impl Letter {
+    /// The canonical data-model form of the letter's own fields —
+    /// the barrier request embeds exactly this (round 33).
+    pub fn to_value(&self) -> Value {
+        let opt_text = |s: &Option<String>| match s {
+            Some(s) => Value::Text(s.clone()),
+            None => Value::Null,
+        };
+        Value::map(vec![
+            (
+                "authority".into(),
+                Value::Array(
+                    self.authority
+                        .iter()
+                        .map(|a| Value::Text(a.clone()))
+                        .collect(),
+                ),
+            ),
+            ("cause".into(), opt_text(&self.cause)),
+            ("correlation".into(), opt_text(&self.correlation)),
+            ("kind".into(), Value::Text(self.kind.clone())),
+            ("payload".into(), Value::Bytes(self.payload.clone())),
+        ])
+        .expect("fixed hygienic keys")
+    }
+
+    /// The inverse of [`Letter::to_value`]. Shape-validated, then
+    /// [`Letter::validate`] — the barrier's inbound letter half gets
+    /// the same checks as a committed envelope's.
+    pub fn from_value(v: &Value) -> Result<Letter, EnvelopeError> {
+        const E: EnvelopeError = EnvelopeError::BadForm("malformed canonical letter");
+        let Value::Map(pairs) = v else {
+            return Err(E);
+        };
+        let field = |name: &str| pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+        let text = |name: &str| field(name).and_then(Value::as_text).ok_or(E);
+        let opt_text = |name: &str| match field(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Text(s)) => Ok(Some(s.to_string())),
+            _ => Err(E),
+        };
+        let kind = text("kind")?.to_string();
+        let Value::Bytes(payload) = field("payload").ok_or(E)? else {
+            return Err(E);
+        };
+        let Value::Array(authority_items) = field("authority").ok_or(E)? else {
+            return Err(E);
+        };
+        let mut authority = Vec::new();
+        for item in authority_items {
+            authority.push(item.as_text().ok_or(E)?.to_string());
+        }
+        let letter = Letter {
+            kind,
+            payload: payload.clone(),
+            cause: opt_text("cause")?,
+            correlation: opt_text("correlation")?,
+            authority,
+        };
+        letter.validate()?;
+        Ok(letter)
+    }
+
     /// Structural validation (spec §3.5 admission's letter half).
     /// Pub so the runtime can re-check letters whose fields were set
     /// directly — the core trusts nothing.
@@ -151,14 +243,7 @@ impl Envelope {
             Some(s) => Value::Text(s.clone()),
             None => Value::Null,
         };
-        let addr = |a: &Address| match a {
-            Address::Named { context, name } => Value::map(vec![
-                ("name".into(), Value::Text(name.clone())),
-                ("context".into(), Value::Text(context.clone())),
-            ])
-            .expect("fixed hygienic keys"),
-            Address::Instance(id) => Value::Text(id.clone()),
-        };
+        let addr = address_to_value;
         Value::map(vec![
             ("to".into(), addr(&self.to)),
             ("seq".into(), Value::Int(self.seq as i64)),
@@ -221,19 +306,7 @@ impl Envelope {
                 _ => Err(E),
             }
         }
-        fn addr(v: &Value) -> Option<Address> {
-            match v {
-                Value::Text(s) => Some(Address::Instance(s.clone())),
-                // canonical key order: "name"(4) < "context"(7)
-                Value::Map(p) if p.len() == 2 && p[0].0 == "name" && p[1].0 == "context" => {
-                    Some(Address::Named {
-                        name: p[0].1.as_text()?.to_string(),
-                        context: p[1].1.as_text()?.to_string(),
-                    })
-                }
-                _ => None,
-            }
-        }
+        let addr = address_from_value;
         let Value::Map(pairs) = v else {
             return Err(E);
         };
