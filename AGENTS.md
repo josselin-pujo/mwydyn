@@ -70,7 +70,13 @@ Send+Sync, boxed passthrough) + RamBlobStore + SQLiteBlobStore
 tag-1002 digests across EVERY lineage (active AND ghost: ghosts are
 readable, so ghost-referenced blobs survive GC); payload scanning is
 data-model work (tag 1002), not schema — round 10 intact, sweep-only;
-`Context::with_stores` = the durable combo constructor. **`mwydyn-core` RUNS** (work-notes/15): native
+`Context::with_stores` = the durable combo constructor.
+**M1 WASM container RUNS** (work-notes/31): `WasmActor` wrapping
+wasmtime Store + Instance + TypedFunc; ping/pong through Context
+pump at 3434 bounces/s (5000 bounces, 2 WASM actors, RAM tier);
+WASM execution is NOT the bottleneck — the framework per-letter
+cost dominates; WASM floor: 1.4M calls/s raw wasmtime.
+**`mwydyn-core` RUNS** (work-notes/15): native
 actors over `receive(ctx, host, letter) → effects` (MsgCtx = runtime-
 minted from, read-only); four-phase effects engine (transition →
 validate-all → classify → journal-commit); **the mailbox IS a cursor
