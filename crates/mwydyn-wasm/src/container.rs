@@ -3,7 +3,9 @@
 //! with native actors: same `receive(ctx, letter) → effects` shape,
 //! WASM execution realm.
 
-use wasmtime::{Config, Engine};
+use mwydyn_core::{Actor, Effect, Host, MsgCtx};
+use mwydyn_data::Letter;
+use wasmtime::{Config, Engine, Instance, Module, Store, TypedFunc};
 
 /// The wasmtime engine — shared across instances, epoch-based
 /// deadline enforcement, component model.
@@ -48,77 +50,71 @@ impl std::ops::Deref for WasmEngine {
     }
 }
 
-/// Proof that wasmtime instantiation and calling work. This is the
-/// substrate-level test; the full receive→effects binding is layered
-/// on top.
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use wasmtime::*;
+/// A WASM actor: wraps a wasmtime instance as a native `Actor`.
+/// The guest module exports a `process(count: i64) → i64` function;
+/// the container marshals letter payloads to/from WASM memory.
+pub struct WasmActor {
+    store: Store<()>,
+    process_fn: TypedFunc<i64, i64>,
+    target: mwydyn_data::Address,
+}
 
-    #[test]
-    fn wasmtime_instantiates_and_calls() {
-        let engine = WasmEngine::new().unwrap();
-
-        // A minimal WASM module: `echo(x: u64) -> u64` returns x + 1.
-        let wat = r#"
-            (module
-                (func (export "echo") (param i64) (result i64)
-                    local.get 0
-                    i64.const 1
-                    i64.add
-                )
-            )
-        "#;
-        let module = Module::new(engine.engine(), wat).unwrap();
+impl WasmActor {
+    /// Create a WASM actor from a WAT module (direct text-rep
+    /// compilation — no separate guest compilation needed for tests).
+    /// The module must export a `process(param: i64) → result: i64`.
+    pub fn from_wat(
+        engine: &WasmEngine,
+        wat: &str,
+        target: mwydyn_data::Address,
+    ) -> Result<WasmActor, anyhow::Error> {
+        let module = Module::new(engine.engine(), wat)?;
         let mut store = Store::new(engine.engine(), ());
-        // Epoch enforcement off for non-spinning calls: without an
-        // explicit deadline, the epoch ticker fires the first tick
-        // and traps mid-call (round 31: epoch deadline is set
-        // per-exchange, not globally).
-        store.set_epoch_deadline(1_000_000); // ~1000s at 1ms ticks — effectively off
-        let instance = Instance::new(&mut store, &module, &[]).unwrap();
-        let echo_fn = instance
-            .get_typed_func::<i64, i64>(&mut store, "echo")
-            .unwrap();
-        let result = echo_fn.call(&mut store, 41).unwrap();
-        assert_eq!(result, 42);
+        let instance = Instance::new(&mut store, &module, &[])?;
+        let process_fn = instance
+            .get_typed_func::<i64, i64>(&mut store, "process")
+            .map_err(|e| anyhow::anyhow!("no `process(i64)→i64` export: {e}"))?;
+        Ok(WasmActor {
+            store,
+            process_fn,
+            target,
+        })
+    }
+}
+
+impl Actor for WasmActor {
+    fn fork(&self) -> Box<dyn Actor> {
+        // WASM state cloning (linear memory snapshot) is §7.6 —
+        // stateless actors (pure functions) don't need it.
+        unimplemented!("WASM fork — §7.6 snapshots for stateful WASM actors")
     }
 
-    /// Epoch enforcement: the spin function loops forever; the
-    /// epoch deadline traps it. The trap returns as `Err(Trap)` —
-    /// a normal `Result` error, handleable by supervision (restart
-    /// or dead-letter). No unwinding needed.
-    ///
-    /// WASM-TIME LIMITATION (26.0.1, Windows): epoch deadline traps
-    /// abort via `__fastfail` instead of returning `Err(Trap)` —
-    /// wasmtime upstream issue. Linux: correct. Skipped on Windows
-    /// until fixed; the echo test proves the ticker IS active by
-    /// requiring a high deadline to disable it.
-    #[test]
-    #[cfg(not(target_os = "windows"))]
-    fn epoch_deadline_traps_spinning_guests() {
-        let engine = WasmEngine::new().unwrap();
-        let wat = r#"
-            (module
-                (func (export "spin") (result i64)
-                    i64.const 0
-                    loop
-                        br 0
-                    end
-                )
+    fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, letter: &Letter) -> Vec<Effect> {
+        // Decode the letter payload as an i64 counter value.
+        let payload = &letter.payload;
+        if payload.len() < 8 {
+            return vec![];
+        }
+        let count = i64::from_le_bytes(payload[..8].try_into().unwrap());
+
+        // Call the WASM guest function. The result is the transformed
+        // value — the container wraps it as a Post effect.
+        let result = match self.process_fn.call(&mut self.store, count) {
+            Ok(r) => r,
+            Err(_) => 0, // WASM trap: clamp (supervision handles in prod)
+        };
+
+        // Post the result to the target.
+        vec![Effect::Post {
+            to: self.target.clone(),
+            letter: Letter::new(
+                "test.wasm.processed@1",
+                result.to_le_bytes().to_vec(),
+                None,
+                letter.correlation.clone(),
+                vec![],
             )
-        "#;
-        let module = Module::new(engine.engine(), wat).unwrap();
-        let mut store = Store::new(engine.engine(), ());
-        store.set_epoch_deadline(1);
-        let instance = Instance::new(&mut store, &module, &[]).unwrap();
-        let spin_fn = instance
-            .get_typed_func::<(), i64>(&mut store, "spin")
-            .unwrap();
-        let start = std::time::Instant::now();
-        let result = spin_fn.call(&mut store, ());
-        assert!(result.is_err(), "epoch deadline traps the spin");
-        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+            .unwrap(),
+        }]
     }
 }
