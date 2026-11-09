@@ -300,10 +300,19 @@ fn fan_out_parallel_throughput_report() {
             .unwrap();
             ctx.post(&addr("tp", &target), l, vec![]);
         }
-        ctx.run_until_idle(20_000);
+        let stats = ctx.run_until_idle(20_000);
         let elapsed = start.elapsed();
         let replies = ctx.drain_external().len();
         assert_eq!(replies, n, "every letter answered at workers={workers}");
+        if let Some(p) = stats.profile {
+            let per_ex = p.committer_us_per_exchange(stats.passes);
+            eprintln!(
+                "pool profile (workers={workers}): waves={} wall={}us compose={}us stage={}us collect={}us apply={}us | committer={:.1}us/ex (bound ~{:.0}/s), wall={:.1}us/ex",
+                p.waves, p.wall_us, p.compose_us, p.stage_dispatch_us, p.collect_us,
+                p.apply_us, per_ex, 1e6 / per_ex.max(0.001),
+                p.wall_us as f64 / stats.passes.max(1) as f64
+            );
+        }
         n as f64 / elapsed.as_secs_f64()
     };
     let serial = run(0);

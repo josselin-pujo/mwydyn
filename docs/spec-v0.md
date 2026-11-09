@@ -355,7 +355,13 @@ ceremony without payoff.
   writer — the committer) / `JournalFace` = both. It maps directly
   onto real journal implementations (read view vs write publisher);
   in-core, an `Arc<RwLock<...>>` enforces the law mechanically —
-  no unsafe. The serial `run_until_idle` pump stays
+  no unsafe. **Wave pipelining [round 36]**: the next wave dispatches
+  before the current applies — collect AND apply overlap with worker
+  execution; the committer's per-exchange serial cost is the measured
+  Amdahl bound (`PumpStats.profile`), and throughput work follows it:
+  cheap-transition workloads are committer-bound (cheaper apply/
+  compose is the lever), expensive-transition workloads are
+  worker-bound (the fork cost is the lever — §7.6 snapshots). The serial `run_until_idle` pump stays
   forever as the deterministic mode (tests, replay verification).
   Readiness bounds bought now: `JournalFace: Send+Sync` (external
   providers are threaded — one that cannot cross threads is not a

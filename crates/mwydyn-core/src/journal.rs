@@ -129,6 +129,13 @@ pub trait JournalRead: Send + Sync {
     /// Undelivered letters for an actor on the ACTIVE lineage, in seq
     /// order (the mailbox IS a cursor over the journal, §2/§3.1).
     fn pending(&self, context: &str, actor: &str) -> Result<Vec<Envelope>, JournalError>;
+    /// The front of the mailbox WITHOUT cloning the whole queue — the
+    /// pool's compose scan peeks per actor per wave (round 36: the
+    /// profile showed full-queue clones dominating the committer).
+    /// Providers with a cheap front-lookup should specialize.
+    fn pending_first(&self, context: &str, actor: &str) -> Result<Option<Envelope>, JournalError> {
+        Ok(self.pending(context, actor)?.into_iter().next())
+    }
     fn pending_count(&self, context: &str, actor: &str) -> Result<usize, JournalError>;
     /// The actor's cursor ON THE GIVEN LINEAGE (cursors are per-
     /// lineage; forks seed them clamped to the fork point).
@@ -339,6 +346,20 @@ impl JournalRead for InMemoryJournal {
             );
         }
         Ok(out)
+    }
+    fn pending_first(&self, context: &str, actor: &str) -> Result<Option<Envelope>, JournalError> {
+        let Some(ctx) = self.ctxs.get(context) else {
+            return Err(JournalError::UnknownContext);
+        };
+        let active = ctx.active;
+        let Some(seqs) = ctx.pending.get(&(active, actor.to_string())) else {
+            return Ok(None);
+        };
+        let Some(&front) = seqs.first() else {
+            return Ok(None);
+        };
+        let (lin, s) = ctx.owner(active, front)?;
+        Ok(ctx.entries.get(&(lin, s)).cloned())
     }
 
     fn pending_count(&self, context: &str, actor: &str) -> Result<usize, JournalError> {

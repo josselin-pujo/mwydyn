@@ -100,7 +100,20 @@ poison recovery (into_inner). Throughput re-measured: 8 WASM guests
 serial 3,206/s → pool(4) 3,921/s (1.22×, first real speedup);
 cheap-transitions stays serial-favored (pool = the
 expensive-transitions tool; serial pump = deterministic + cheap
-mode). Next lever: pipelining wave N+1 under wave N's apply.
+mode). ROUND 36: WAVE PIPELINING LANDED — next wave dispatched before the
+current is collected+applied (compose skips dispatched indices;
+results GLOBALLY sequenced, buffered per wave — pipeline interleaving
+otherwise mismatches actors to envelopes; re-arm composition after
+apply or the loop quiesces early). `JournalRead::pending_first()` —
+the profile exposed compose cloning whole queues for `.first()`
+(435ms of 439ms wall!); the peek transformed the numbers. MEASURED
+AMDAHL POINT (work-notes/34): echo committer = 34.6µs/ex (bound
+~29k/s — COMMITTER-BOUND: cheaper apply/compose is the lever, not
+workers); WASM wall 248µs/ex vs committer 148µs/ex (worker-bound
+approaching: fork 120µs + receive 71µs per worker per exchange —
+§7.6 WASM snapshots kill the fork, then apply, then more workers).
+`PumpStats.profile` = the phase ledger (PoolProfile) for future
+profiling.
 **M1 WASM container RUNS** (work-notes/31): `WasmActor` wrapping
 wasmtime Store + Instance + TypedFunc; ping/pong through Context
 pump at 3434 bounces/s (5000 bounces, 2 WASM actors, RAM tier);

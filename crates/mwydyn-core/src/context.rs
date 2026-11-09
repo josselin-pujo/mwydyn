@@ -264,6 +264,46 @@ pub struct PumpStats {
     /// drains all count (they all moved the world). The precise
     /// record of refusals lives in telemetry.
     pub passes: usize,
+    /// ROUND 36 — the pool pump's phase timings (pool mode only).
+    /// `collect_us` is the pump BLOCKING while workers run — the
+    /// parallel-executed segment; everything else is the serial
+    /// committer's. THE AMDAHL POINT: `serial_fraction()` against
+    /// these numbers is where throughput work pays and where it
+    /// cannot.
+    pub profile: Option<PoolProfile>,
+}
+
+/// The committer's phase ledger for one pool run (microseconds).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PoolProfile {
+    pub waves: usize,
+    /// Scanning for deliverable actors (journal pending reads).
+    pub compose_us: u64,
+    /// Taking actors + building/sending jobs.
+    pub stage_dispatch_us: u64,
+    /// The pump blocked on results — workers ran here (parallel).
+    pub collect_us: u64,
+    /// land_effects: validate + classify + commit, in dispatch order.
+    pub apply_us: u64,
+    /// Poll injection (armed tickers).
+    pub polls_us: u64,
+    /// The run's total wall time — the denominator the throughput
+    /// bounds are computed against.
+    pub wall_us: u64,
+}
+
+impl PoolProfile {
+    /// The committer's serial work per exchange (µs) — THE AMDAHL
+    /// POINT: throughput caps at `1e6 / this` no matter how many
+    /// workers exist. The lever is shrinking apply+compose, not
+    /// adding parallelism.
+    pub fn committer_us_per_exchange(&self, exchanges: usize) -> f64 {
+        if exchanges == 0 {
+            return 0.0;
+        }
+        let serial = self.compose_us + self.stage_dispatch_us + self.apply_us + self.polls_us;
+        serial as f64 / exchanges as f64
+    }
 }
 
 struct Entry {
@@ -346,6 +386,14 @@ pub struct Context {
     /// never starve its neighbors (the busy self-heal depends on
     /// neighbors getting turns).
     next_scan: usize,
+    /// ROUND 36 — indices with a transition dispatched and not yet
+    /// applied: compose skips them (single-cursor holds across the
+    /// pipeline) and the terminal drain must never fire on them.
+    dispatched: std::collections::HashSet<usize>,
+    /// The staged wave's landing data, in dispatch order (seq order):
+    /// the parked envelope gives land_effects its ack position.
+    dispatched_order: VecDeque<usize>,
+    dispatched_envs: HashMap<usize, mwydyn_data::Envelope>,
 }
 
 impl Context {
@@ -389,6 +437,9 @@ impl Context {
             clock: Box::new(WallClock),
             counters: 0,
             next_scan: 0,
+            dispatched: std::collections::HashSet::new(),
+            dispatched_order: VecDeque::new(),
+            dispatched_envs: HashMap::new(),
         };
         ctx.spawn_entry(
             Spawn::new(Some("ticker"), Box::new(|| Box::new(Ticker::new())))
@@ -433,6 +484,9 @@ impl Context {
             clock: Box::new(WallClock),
             counters: 0,
             next_scan: 0,
+            dispatched: std::collections::HashSet::new(),
+            dispatched_order: VecDeque::new(),
+            dispatched_envs: HashMap::new(),
         };
         ctx.spawn_entry(
             Spawn::new(Some("ticker"), Box::new(|| Box::new(Ticker::new())))
@@ -1342,6 +1396,7 @@ impl Context {
     /// log (round 21's law).
     fn run_until_idle_pool(&mut self, max_passes: usize) -> PumpStats {
         use std::sync::mpsc;
+        let run_start = std::time::Instant::now();
         let mut stats = PumpStats::default();
         let workers = self.workers.max(2);
         let (job_tx, job_rx) = mpsc::channel::<WaveJob>();
@@ -1385,72 +1440,149 @@ impl Context {
         }
         drop(res_tx); // the pump's own copy; the workers hold clones
 
-        for _ in 0..max_passes {
+        // ROUND 36 — WAVE PIPELINING: the next wave is dispatched
+        // BEFORE the current wave is collected and applied, so both
+        // the collect window AND the apply phase overlap with worker
+        // execution. Legality: compose skips dispatched indices
+        // (single-cursor holds across the pipeline; the terminal
+        // drain can never fire on them), and results carry GLOBAL
+        // seqs buffered per wave — with the pipeline open, wave k+1's
+        // fast results can arrive before wave k's slow one.
+        // Transactions still land strictly in dispatch order (the
+        // journal's total order = dispatch order).
+        let mut next_seq: u64 = 0;
+        let mut stats_passes = 0usize;
+        let mut profile = PoolProfile::default();
+        let mut buffer: std::collections::BTreeMap<u64, WaveOutcome> = Default::default();
+
+        let t = std::time::Instant::now();
+        let mut next_wave = self.compose_wave(workers);
+        profile.compose_us += t.elapsed().as_micros() as u64;
+        let mut awaiting: Option<(u64, u64)> = None; // (first_seq, end_seq)
+
+        loop {
+            let tp = std::time::Instant::now();
             self.inject_polls();
-            let wave = self.compose_wave(workers);
-            if wave.is_empty() {
-                break;
-            }
-            stats.passes += wave.len();
+            profile.polls_us += tp.elapsed().as_micros() as u64;
 
-            // Stage the jobs: the ORIGINAL actor moves out to the
-            // worker; the entry stands empty mid-wave (nothing scans
-            // between composition and apply — the committer thread is
-            // the only scanner, and it is right here).
-            let mut jobs = Vec::with_capacity(wave.len());
-            for (wave_seq, (idx, env)) in wave.iter().enumerate() {
-                let entry = &mut self.entries[*idx];
-                let moved = entry.actor.take().expect("live");
-                jobs.push(WaveJob {
-                    seq: wave_seq as u64,
-                    actor: moved,
-                    letter: env.letter.clone(),
-                    from: env.from.clone(),
-                    rows: entry.rows.clone(),
-                    now: self.clock.now_micros(),
-                });
+            // STAGE + DISPATCH the composed wave: the ORIGINAL actor
+            // moves out; the entry stands empty mid-flight (compose
+            // skips it via the dispatched marker). The pass bound
+            // holds here too — a permanent busy-loop is a bug, and
+            // the bound makes it a visible one.
+            let t = std::time::Instant::now();
+            if !next_wave.is_empty() && stats_passes >= max_passes {
+                next_wave.clear();
             }
-            for job in jobs {
-                let _ = job_tx.send(job);
+            if !next_wave.is_empty() {
+                let len = next_wave.len();
+                let first = next_seq;
+                for (idx, env) in next_wave.drain(..) {
+                    let entry = &mut self.entries[idx];
+                    let moved = entry.actor.take().expect("live");
+                    self.dispatched.insert(idx);
+                    self.dispatched_order.push_back(idx);
+                    self.dispatched_envs.insert(idx, env.clone());
+                    let _ = job_tx.send(WaveJob {
+                        seq: next_seq,
+                        actor: moved,
+                        letter: env.letter.clone(),
+                        from: env.from.clone(),
+                        rows: entry.rows.clone(),
+                        now: self.clock.now_micros(),
+                    });
+                    next_seq += 1;
+                }
+                awaiting = Some((first, first + len as u64));
+                stats_passes += len;
+                profile.waves += 1;
+
+                // COMPOSE THE NEXT WAVE while workers run the
+                // just-dispatched one (dispatched indices are skipped
+                // — they hold their single cursor).
+                next_wave = self.compose_wave(workers);
+                profile.compose_us += t.elapsed().as_micros() as u64;
+            } else {
+                profile.stage_dispatch_us += t.elapsed().as_micros() as u64;
             }
 
-            let mut results: Vec<WaveOutcome> =
-                (0..wave.len()).filter_map(|_| res_rx.recv().ok()).collect();
-            results.sort_by_key(|r| r.seq);
-
-            // THE COMMITTER: dispatch order, no concurrency from here
-            // on. Sorted by seq, results align positionally.
-            for (r, (idx, env)) in results.into_iter().zip(wave) {
-                let WaveOutcome { seq: _, outcome, actor, rollback } = r;
-                match outcome {
-                    Ok(effects) => {
-                        if self.land_effects(idx, &env, effects) {
-                            // Mutation kept: the mutated actor returns;
-                            // the rollback copy is dropped.
-                            self.entries[idx].actor = Some(actor);
-                        } else {
-                            // Refused (busy/strike): restore the
-                            // pre-receive copy — state rolls back to
-                            // the ack boundary.
-                            self.entries[idx].actor = Some(rollback);
+            // COLLECT + APPLY the outstanding wave (workers run the
+            // just-dispatched one through both of these phases).
+            if let Some((first, end)) = awaiting {
+                let t = std::time::Instant::now();
+                while !(first..end).all(|sq| buffer.contains_key(&sq)) {
+                    match res_rx.recv() {
+                        Ok(r) => {
+                            buffer.insert(r.seq, r);
+                        }
+                        Err(_) => {
+                            panic!("pool: worker channel closed before the wave answered");
                         }
                     }
-                    Err(()) => {
-                        // Crash: restore first, then supervision
-                        // decides (restart/fail-fast) — the serial
-                        // path's exact semantics.
-                        self.entries[idx].actor = Some(rollback);
-                        self.handle_crash(idx);
+                }
+                profile.collect_us += t.elapsed().as_micros() as u64;
+
+                let t = std::time::Instant::now();
+                for sq in first..end {
+                    let r = buffer.remove(&sq).expect("collected above");
+                    let idx = self
+                        .dispatched_order
+                        .pop_front()
+                        .expect("staged wave data present");
+                    self.dispatched.remove(&idx);
+                    let env = self
+                        .dispatched_envs
+                        .remove(&idx)
+                        .expect("staged envelope present");
+                    let WaveOutcome { seq: _, outcome, actor, rollback } = r;
+                    match outcome {
+                        Ok(effects) => {
+                            if self.land_effects(idx, &env, effects) {
+                                // Mutation kept: the mutated actor
+                                // returns; the rollback copy is
+                                // dropped.
+                                self.entries[idx].actor = Some(actor);
+                            } else {
+                                // Refused (busy/strike): restore the
+                                // pre-receive copy — state rolls back
+                                // to the ack boundary.
+                                self.entries[idx].actor = Some(rollback);
+                            }
+                        }
+                        Err(()) => {
+                            // Crash: restore first, then supervision
+                            // decides (restart/fail-fast) — the serial
+                            // path's exact semantics.
+                            self.entries[idx].actor = Some(rollback);
+                            self.handle_crash(idx);
+                        }
                     }
                 }
+                profile.apply_us += t.elapsed().as_micros() as u64;
+                awaiting = None;
+                self.maybe_flush_durability();
+                // The world just moved (posts landed, cursors
+                // advanced): re-arm composition — the wave composed
+                // during the last flight may have been empty because
+                // every actor was in flight.
+                if next_wave.is_empty() {
+                    let t = std::time::Instant::now();
+                    next_wave = self.compose_wave(workers);
+                    profile.compose_us += t.elapsed().as_micros() as u64;
+                }
+            } else if next_wave.is_empty() {
+                // Nothing in flight and nothing composed: quiescence.
+                break;
             }
-            self.maybe_flush_durability();
         }
         drop(job_tx);
         for h in handles {
             let _ = h.join();
         }
         self.maybe_flush_durability();
+        stats.passes += stats_passes;
+        profile.wall_us = run_start.elapsed().as_micros() as u64;
+        stats.profile = Some(profile);
         stats
     }
 
@@ -1465,17 +1597,21 @@ impl Context {
         let mut last_idx: Option<usize> = None;
         for k in 0..n {
             let idx = (self.next_scan + k) % n;
+            // ROUND 36: in-flight across the pipeline — its cursor is
+            // held; the terminal drain must never fire on it.
+            if self.dispatched.contains(&idx) {
+                continue;
+            }
             if self.entries[idx].actor.is_none() {
                 if self.drain_terminal(idx) {
                     last_idx = Some(idx);
                 }
                 continue;
             }
-            let pending = jread(&self.journal)
-                .pending(&self.name, &self.entries[idx].id)
-                .unwrap_or_default();
-            if let Some(front) = pending.first() {
-                wave.push((idx, front.clone()));
+            if let Ok(Some(front)) =
+                jread(&self.journal).pending_first(&self.name, &self.entries[idx].id)
+            {
+                wave.push((idx, front));
                 last_idx = Some(idx);
                 if wave.len() >= workers {
                     break;
