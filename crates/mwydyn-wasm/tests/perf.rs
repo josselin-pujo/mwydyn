@@ -41,6 +41,7 @@ fn wasm_ping_pong_raw_floor() {
 /// and call its process function through wasmtime's component API.
 /// This proves the WASM execution realm works end to end.
 #[test]
+#[cfg_attr(target_os = "windows", ignore = "wasmtime 26 Windows: component model calls abort (__fastfail) instead of returning Err(Trap) — needs Linux CI or wasmtime fix")]
 fn component_model_instantiates_and_calls() {
     use wasmtime::component::{Component, Linker};
     use wasmtime::{Config, Engine as WtEngine, Store as WtStore};
