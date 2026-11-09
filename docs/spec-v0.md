@@ -362,6 +362,12 @@ ceremony without payoff.
   cheap-transition workloads are committer-bound (cheaper apply/
   compose is the lever), expensive-transition workloads are
   worker-bound (the fork cost is the lever — §7.6 snapshots).
+  **Depth-N [round 38]**: `PIPELINE_DEPTH` waves in flight — apply
+  AND collect overlap across the pipeline; echo-class workloads
+  saturate the committer (wall = committer bound, measured). The
+  overlay's recording layer is a WRAPPER (`RecordingJournal`) — the
+  hot journal never records for tiers without a durable face, and
+  `Commit.appended` carries external-target envelopes only.
 - **The WASM guest lifecycle [DECIDED, round 37]**: instances are
   PERSISTENT — created lazily on first use, reused across letters;
   per-letter instantiation is gone. The transactional guarantee

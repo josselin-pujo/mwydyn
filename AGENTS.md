@@ -132,6 +132,22 @@ NUMBERS: serial 2,671→4,189/s (+57%), pool(4) 3,799→9,829/s
 (2.35× serial), wall 248→86µs/ex — the fork lever is dead; next
 levers are pipelining depth + apply cost. Guest lifecycle ABI for
 snapshot-restore-from-boot queued (§7.6).
+**ROUND 38: DEPTH-N PIPELINING + APPLY-COST HUNT** (work-notes/36):
+PIPELINE_DEPTH=4 (fill-loop dispatch; round-36 invariants hold);
+micro-profile showed journal.commit = THE apply cost (10.6µs vs
+333ns payload wall) — fixed by `RecordingJournal` (the overlay's
+recording is a WRAPPER; the hot journal records nothing — the
+round-34 inherent-vs-trait no-op class dies with the field) and
+`Commit.appended` now external-ONLY (internal appends pay no clone;
+single consumer is the outbox check). Numbers: echo pool(4)
+**30,764/s (7.9× serial, wall 23.8µs/ex ≈ committer bound 21.8µs —
+THE PIPELINE SATURATES THE COMMITTER)**; WASM serial 6,249/s
+(persistent instances help serial too), pool ~9.5k/s with committer
+(~15.2k) and worker (~14k) bounds BALANCED — wave granularity is the
+residual. Throughput ledger 34→38: echo 3.0k→30.8k, WASM 2.5k→9.5k.
+Next levers (not urgent): cheaper stage (letter/rows clone per job
+≈5.8µs/ex), ack front-shift, worker count — the features board is
+the better spend.
 **M1 WASM container RUNS** (work-notes/31): `WasmActor` wrapping
 wasmtime Store + Instance + TypedFunc; ping/pong through Context
 pump at 3434 bounces/s (5000 bounces, 2 WASM actors, RAM tier);

@@ -472,7 +472,9 @@ impl Context {
             by_name: HashMap::new(),
             by_id: HashMap::new(),
             blobs: Arc::from(blobs),
-            journal: Arc::new(RwLock::new(Box::new(InMemoryJournal::new(Box::new(WallClock))))),
+            journal: Arc::new(RwLock::new(Box::new(crate::journal::RecordingJournal::new(
+                Box::new(InMemoryJournal::new(Box::new(WallClock))),
+            )))),
             durable: Some(durable),
             synced_through: 0,
             max_ops_per_flush: DEFAULT_MAX_OPS_PER_FLUSH,
@@ -1443,41 +1445,43 @@ impl Context {
         }
         drop(res_tx); // the pump's own copy; the workers hold clones
 
-        // ROUND 36 — WAVE PIPELINING: the next wave is dispatched
-        // BEFORE the current wave is collected and applied, so both
-        // the collect window AND the apply phase overlap with worker
-        // execution. Legality: compose skips dispatched indices
+        // ROUND 36/38 — WAVE PIPELINING at DEPTH: up to
+        // `PIPELINE_DEPTH` waves are dispatched before the oldest one
+        // is collected and applied — the committer's collect AND
+        // apply phases overlap with worker execution across the whole
+        // pipeline, not just one wave deep. Legality (round 36's
+        // invariants, unchanged): compose skips dispatched indices
         // (single-cursor holds across the pipeline; the terminal
-        // drain can never fire on them), and results carry GLOBAL
-        // seqs buffered per wave — with the pipeline open, wave k+1's
-        // fast results can arrive before wave k's slow one.
-        // Transactions still land strictly in dispatch order (the
-        // journal's total order = dispatch order).
+        // drain can never fire on them), results carry GLOBAL seqs
+        // buffered per wave (a young wave's fast results can arrive
+        // before an old wave's slow one), and transactions land
+        // strictly in dispatch order — the journal's total order =
+        // dispatch order.
+        const PIPELINE_DEPTH: usize = 4;
         let mut next_seq: u64 = 0;
         let mut stats_passes = 0usize;
         let mut profile = PoolProfile::default();
         let mut buffer: std::collections::BTreeMap<u64, WaveOutcome> = Default::default();
+        let mut outstanding: std::collections::VecDeque<(u64, u64)> = Default::default();
 
         let t = std::time::Instant::now();
         let mut next_wave = self.compose_wave(workers);
         profile.compose_us += t.elapsed().as_micros() as u64;
-        let mut awaiting: Option<(u64, u64)> = None; // (first_seq, end_seq)
 
         loop {
             let tp = std::time::Instant::now();
             self.inject_polls();
             profile.polls_us += tp.elapsed().as_micros() as u64;
 
-            // STAGE + DISPATCH the composed wave: the ORIGINAL actor
-            // moves out; the entry stands empty mid-flight (compose
-            // skips it via the dispatched marker). The pass bound
-            // holds here too — a permanent busy-loop is a bug, and
-            // the bound makes it a visible one.
+            // FILL THE PIPELINE: dispatch composed waves until the
+            // depth is reached (or the pass bound bites — a permanent
+            // busy-loop is a bug, and the bound makes it a visible
+            // one).
             let t = std::time::Instant::now();
-            if !next_wave.is_empty() && stats_passes >= max_passes {
-                next_wave.clear();
-            }
-            if !next_wave.is_empty() {
+            while outstanding.len() < PIPELINE_DEPTH
+                && !next_wave.is_empty()
+                && stats_passes < max_passes
+            {
                 let len = next_wave.len();
                 let first = next_seq;
                 for (idx, env) in next_wave.drain(..) {
@@ -1496,22 +1500,20 @@ impl Context {
                     });
                     next_seq += 1;
                 }
-                awaiting = Some((first, first + len as u64));
+                outstanding.push_back((first, first + len as u64));
                 stats_passes += len;
                 profile.waves += 1;
 
-                // COMPOSE THE NEXT WAVE while workers run the
-                // just-dispatched one (dispatched indices are skipped
-                // — they hold their single cursor).
+                // COMPOSE the next wave while workers run everything
+                // just dispatched (dispatched indices are skipped —
+                // they hold their single cursor).
                 next_wave = self.compose_wave(workers);
-                profile.compose_us += t.elapsed().as_micros() as u64;
-            } else {
-                profile.stage_dispatch_us += t.elapsed().as_micros() as u64;
             }
+            profile.stage_dispatch_us += t.elapsed().as_micros() as u64;
 
-            // COLLECT + APPLY the outstanding wave (workers run the
-            // just-dispatched one through both of these phases).
-            if let Some((first, end)) = awaiting {
+            // COLLECT + APPLY the OLDEST outstanding wave (workers
+            // run the younger ones through both of these phases).
+            if let Some((first, end)) = outstanding.pop_front() {
                 let t = std::time::Instant::now();
                 while !(first..end).all(|sq| buffer.contains_key(&sq)) {
                     match res_rx.recv() {
@@ -1568,20 +1570,22 @@ impl Context {
                     }
                 }
                 profile.apply_us += t.elapsed().as_micros() as u64;
-                awaiting = None;
                 self.maybe_flush_durability();
-                // The world just moved (posts landed, cursors
-                // advanced): re-arm composition — the wave composed
-                // during the last flight may have been empty because
-                // every actor was in flight.
-                if next_wave.is_empty() {
+            }
+
+            // RE-ARM: the world just moved (posts landed, cursors
+            // advanced) — the last compose may have seen every actor
+            // in flight. Quiescence: nothing outstanding, nothing
+            // composed, or the pass bound has consumed the queue.
+            if next_wave.is_empty() && outstanding.is_empty() {
+                if stats_passes < max_passes {
                     let t = std::time::Instant::now();
                     next_wave = self.compose_wave(workers);
                     profile.compose_us += t.elapsed().as_micros() as u64;
                 }
-            } else if next_wave.is_empty() {
-                // Nothing in flight and nothing composed: quiescence.
-                break;
+                if next_wave.is_empty() {
+                    break;
+                }
             }
         }
         drop(job_tx);

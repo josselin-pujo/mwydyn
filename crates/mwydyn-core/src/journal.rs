@@ -62,9 +62,10 @@ pub struct Commit {
     pub first_seq: u64,
     pub count: usize,
     pub commit_ts: i64,
-    /// The stamped envelopes for this transaction's APPENDS — identity,
-    /// timestamps, checksums filled. Callers that hold refs (the
-    /// external outbox view) take them from here.
+    /// ROUND 38 — ONLY the stamped envelopes addressed to `external`
+    /// (the outbox view; §3.4). Internal appends are not cloned out —
+    /// the journal's own store is the truth, and cloning every
+    /// envelope showed up in the apply profile.
     pub appended: Vec<Envelope>,
 }
 
@@ -268,15 +269,102 @@ impl CtxJournal {
     }
 }
 
+/// ROUND 38 — THE OVERLAY'S RECORDING LAYER. The hot journal no
+/// longer clones every op into an op log (that cost showed up in the
+/// apply profile: a full envelope clone + a context string per op,
+/// paid by EVERY tier for an overlay most runs never open).
+/// `with_durability` wraps its hot journal in this skin: commits
+/// delegate instantly, the log accumulates, and
+/// `flush_durability()` drains it through the same face methods as
+/// before — zero cost for tiers that have no durable face.
+pub struct RecordingJournal {
+    inner: Box<dyn JournalFace>,
+    log: Vec<(String, JournalOp)>,
+}
+
+impl RecordingJournal {
+    pub fn new(inner: Box<dyn JournalFace>) -> RecordingJournal {
+        RecordingJournal {
+            inner,
+            log: Vec::new(),
+        }
+    }
+}
+
+impl JournalRead for RecordingJournal {
+    fn read(
+        &self,
+        context: &str,
+        lineage: u64,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<Envelope>, JournalError> {
+        self.inner.read(context, lineage, from, to)
+    }
+    fn pending(&self, context: &str, actor: &str) -> Result<Vec<Envelope>, JournalError> {
+        self.inner.pending(context, actor)
+    }
+    fn pending_first(&self, context: &str, actor: &str) -> Result<Option<Envelope>, JournalError> {
+        self.inner.pending_first(context, actor)
+    }
+    fn pending_count(&self, context: &str, actor: &str) -> Result<usize, JournalError> {
+        self.inner.pending_count(context, actor)
+    }
+    fn cursor(
+        &self,
+        context: &str,
+        lineage: u64,
+        actor: &str,
+    ) -> Result<Option<u64>, JournalError> {
+        self.inner.cursor(context, lineage, actor)
+    }
+    fn active_lineage(&self, context: &str) -> Result<u64, JournalError> {
+        self.inner.active_lineage(context)
+    }
+    fn lineages(&self, context: &str) -> Result<Vec<LineageInfo>, JournalError> {
+        self.inner.lineages(context)
+    }
+    fn covered(&self, context: &str, lineage: u64) -> Result<u64, JournalError> {
+        self.inner.covered(context, lineage)
+    }
+    fn letters_for(
+        &self,
+        context: &str,
+        actor: &str,
+        up_to: u64,
+    ) -> Result<Vec<Envelope>, JournalError> {
+        self.inner.letters_for(context, actor, up_to)
+    }
+    fn mints(&self, context: &str, actor: &str) -> Result<Vec<MintFact>, JournalError> {
+        self.inner.mints(context, actor)
+    }
+    fn unsynced_ops(&self) -> &[(String, JournalOp)] {
+        &self.log
+    }
+}
+
+impl JournalCommit for RecordingJournal {
+    fn commit(&mut self, context: &str, ops: Vec<JournalOp>) -> Result<Commit, JournalError> {
+        for op in &ops {
+            self.log.push((context.to_string(), op.clone()));
+        }
+        self.inner.commit(context, ops)
+    }
+    fn take_ops(&mut self, n: usize) -> Vec<(String, JournalOp)> {
+        let drained = self.log.drain(..n.min(self.log.len())).collect();
+        let _ = self.inner.take_ops(n);
+        drained
+    }
+}
+
+impl JournalFace for RecordingJournal {}
+
 /// The first provider. In-memory, single-writer, trivially durable
 /// (commit IS the durability point) — the substrate-independence
 /// witness (the SQLite provider must satisfy the same tests).
 pub struct InMemoryJournal {
     clock: Box<dyn ClockFace>,
     ctxs: HashMap<String, CtxJournal>,
-    /// Op history since the last durability sync — the pipelining
-    /// overlay drained by the DurabilityDriver (round 31).
-    op_log: Vec<(String, JournalOp)>,
 }
 
 impl InMemoryJournal {
@@ -284,19 +372,7 @@ impl InMemoryJournal {
         InMemoryJournal {
             clock,
             ctxs: HashMap::new(),
-            op_log: Vec::new(),
         }
-    }
-
-    /// Ops committed but not yet synced to the durable tier.
-    pub fn unsynced_ops(&self) -> &[(String, JournalOp)] {
-        &self.op_log
-    }
-
-    /// Remove the first `n` ops (the durability driver's post-flush
-    /// truncate).
-    pub fn take_ops(&mut self, n: usize) -> Vec<(String, JournalOp)> {
-        self.op_log.drain(..n.min(self.op_log.len())).collect()
     }
 }
 
@@ -451,14 +527,6 @@ impl JournalRead for InMemoryJournal {
             .cloned()
             .collect())
     }
-
-    // ROUND 34/35: the overlay drain reads these through the FACE
-    // (Box<dyn JournalFace>) — the inherent methods alone were never
-    // reachable through the trait object, so flush_durability()
-    // silently drained nothing (the trait defaults returned empty).
-    fn unsynced_ops(&self) -> &[(String, JournalOp)] {
-        InMemoryJournal::unsynced_ops(self)
-    }
 }
 
 impl JournalCommit for InMemoryJournal {
@@ -470,14 +538,19 @@ impl JournalCommit for InMemoryJournal {
         let commit_ts = now;
         let mut appended: Vec<Envelope> = Vec::new();
         for op in ops {
-            self.op_log.push((context.to_string(), op.clone()));
             match op {
                 JournalOp::Append(p) => {
                     let lineage = ctx.active;
                     let seq = ctx.next_seq(lineage);
                     let mut env = ctx.stamp(&p, lineage, seq, now)?;
                     env.ack = p.ack;
-                    appended.push(env.clone());
+                    // ROUND 38: only EXTERNAL appends are cloned out
+                    // (the outbox view); the store's own entry is the
+                    // truth and internal posts pay no extra clone.
+                    if matches!(&p.to, Address::Instance(id) if id == crate::context::EXTERNAL)
+                    {
+                        appended.push(env.clone());
+                    }
                     ctx.entries.insert((lineage, seq), env);
                     ctx.local_max.insert(lineage, seq);
                     if !p.to_actor.is_empty() {
@@ -559,10 +632,6 @@ impl JournalCommit for InMemoryJournal {
             commit_ts,
             appended,
         })
-    }
-
-    fn take_ops(&mut self, n: usize) -> Vec<(String, JournalOp)> {
-        InMemoryJournal::take_ops(self, n)
     }
 }
 
