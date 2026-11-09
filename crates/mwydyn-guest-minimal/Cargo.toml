@@ -1,5 +1,5 @@
 [package]
-name = "guest-echo"
+name = "mwydyn-guest-minimal"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -7,6 +7,5 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
-[profile.release]
-opt-level = "s"
-lto = true
+[dependencies]
+wit-bindgen = "0.63"

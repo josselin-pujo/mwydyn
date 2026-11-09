@@ -1,0 +1,5 @@
+package mwydyn:minimal@0.1.0;
+
+world minimal {
+    export process: func(count: s64) -> s64;
+}
