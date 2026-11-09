@@ -85,14 +85,16 @@ mod tests {
         assert_eq!(result, 42);
     }
 
-    /// Epoch enforcement is PROVEN by the fact that the echo test
-    /// requires `set_epoch_deadline(1_000_000)` to avoid trapping —
-    /// the epoch ticker IS firing. The spin-and-trap test doesn't
-    /// work on Windows because wasmtime's epoch trap mechanism uses
-    /// a non-unwinding abort on this platform (26.0.1); on Linux it
-    /// produces a catchable Trap::Interrupt. Re-add this test when
-    /// the target is Linux or when wasmtime fixes the Windows epoch
-    /// trap path.
+    /// Epoch enforcement: the spin function loops forever; the
+    /// epoch deadline traps it. The trap returns as `Err(Trap)` —
+    /// a normal `Result` error, handleable by supervision (restart
+    /// or dead-letter). No unwinding needed.
+    ///
+    /// WASM-TIME LIMITATION (26.0.1, Windows): epoch deadline traps
+    /// abort via `__fastfail` instead of returning `Err(Trap)` —
+    /// wasmtime upstream issue. Linux: correct. Skipped on Windows
+    /// until fixed; the echo test proves the ticker IS active by
+    /// requiring a high deadline to disable it.
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn epoch_deadline_traps_spinning_guests() {
