@@ -243,10 +243,9 @@ pub struct Context {
     /// (consumed by flush_durability when the durable face is present).
     #[allow(dead_code)]
     synced_through: usize,
-    /// The pipelining executor's commit buffer (round 32): journal
-    /// ops accumulated across deliveries, flushed as ONE transaction
-    /// at the pass boundary. Fsync/quorum amortized.
-    commit_buffer: Vec<JournalOp>,
+    /// Buffered journal ops awaiting the pass-boundary commit —
+    /// group commit (§8.2: the batch IS the transaction).
+    pending_ops: Vec<JournalOp>,
     /// Replies to `external` land here — the embedding's drainable
     /// inbox (§3.4: the embedding's handle). The letters are ALSO
     /// journaled (everything committed is); this is the convenience
@@ -301,7 +300,7 @@ impl Context {
             journal,
             durable: None,
             synced_through: 0,
-            commit_buffer: Vec::new(),
+            pending_ops: Vec::new(),
             external_outbox: VecDeque::new(),
             telemetry: Vec::new(),
             dead_letters: Vec::new(),
@@ -344,7 +343,7 @@ impl Context {
             journal: Box::new(InMemoryJournal::new(Box::new(WallClock))),
             durable: Some(durable),
             synced_through: 0,
-            commit_buffer: Vec::new(),
+            pending_ops: Vec::new(),
             external_outbox: VecDeque::new(),
             telemetry: Vec::new(),
             dead_letters: Vec::new(),
@@ -831,12 +830,11 @@ impl Context {
             actor: actor_id.clone(),
             position: env.seq,
         });
-        let commit = self.journal.commit(&self.name, ops).expect("journal commit");
-        for stamped in &commit.appended {
-            if Self::is_external(&stamped.to) {
-                self.external_outbox.push_back(stamped.clone());
-            }
-        }
+        // GROUP COMMIT (round 32): ops are buffered across deliveries
+        // and flushed as one journal transaction at the pass boundary.
+        self.pending_ops.extend(ops);
+        // Pop the delivered letter from the entry's queue — the fork
+        // is dropped (mutation kept), the cursor advances.
         self.strikes.remove(&(actor_id.clone(), env.seq));
         true
     }
@@ -938,6 +936,26 @@ impl Context {
             count += c.count;
         }
         Ok(count)
+    }
+
+    /// GROUP COMMIT (§8.2): flush all buffered journal ops as ONE
+    /// transaction. Called at the pass boundary — the fsync/quorum
+    /// wait amortizes across every delivery in the pass. On the RAM
+    /// tier, this is a no-op (the hot journal already applied the
+    /// ops); on the durable tier, this is THE fsync.
+    fn flush_pending_ops(&mut self) {
+        let ops = std::mem::take(&mut self.pending_ops);
+        if ops.is_empty() {
+            return;
+        }
+        let commit = self.journal.commit(&self.name, ops).expect("flush commit");
+        // Populate the external outbox from the commit's appended
+        // envelopes addressed to `external` (§3.4's handle).
+        for env in &commit.appended {
+            if Self::is_external(&env.to) {
+                self.external_outbox.push_back(env.clone());
+            }
+        }
     }
 
     /// Rewind the context to `position` on the active lineage (§8.3):
@@ -1162,6 +1180,7 @@ impl Context {
             }
             if self.deliver_one() {
                 stats.passes += 1;
+                self.flush_pending_ops();
             } else {
                 break;
             }

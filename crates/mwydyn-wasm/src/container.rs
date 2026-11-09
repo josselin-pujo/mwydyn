@@ -99,10 +99,7 @@ impl Actor for WasmActor {
 
         // Call the WASM guest function. The result is the transformed
         // value — the container wraps it as a Post effect.
-        let result = match self.process_fn.call(&mut self.store, count) {
-            Ok(r) => r,
-            Err(_) => 0, // WASM trap: clamp (supervision handles in prod)
-        };
+        let result = self.process_fn.call(&mut self.store, count).unwrap_or(0);
 
         // Post the result to the target.
         vec![Effect::Post {
