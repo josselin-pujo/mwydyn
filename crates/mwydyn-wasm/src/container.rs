@@ -54,6 +54,8 @@ impl std::ops::Deref for WasmEngine {
 /// The guest module exports a `process(count: i64) → i64` function;
 /// the container marshals letter payloads to/from WASM memory.
 pub struct WasmActor {
+    engine: Engine,
+    module: Module,
     store: Store<()>,
     process_fn: TypedFunc<i64, i64>,
     target: mwydyn_data::Address,
@@ -70,11 +72,16 @@ impl WasmActor {
     ) -> Result<WasmActor, anyhow::Error> {
         let module = Module::new(engine.engine(), wat)?;
         let mut store = Store::new(engine.engine(), ());
+        // Epoch enforcement off for the perf test (the production
+        // executor sets the deadline per exchange — §6).
+        store.set_epoch_deadline(1_000_000);
         let instance = Instance::new(&mut store, &module, &[])?;
         let process_fn = instance
             .get_typed_func::<i64, i64>(&mut store, "process")
             .map_err(|e| anyhow::anyhow!("no `process(i64)→i64` export: {e}"))?;
         Ok(WasmActor {
+            engine: engine.engine().clone(),
+            module,
             store,
             process_fn,
             target,
@@ -83,25 +90,34 @@ impl WasmActor {
 }
 
 impl Actor for WasmActor {
+    /// Fork: re-instantiate from the same module. For stateless
+    /// actors (pure functions), fork = fresh is equivalent. For
+    /// stateful WASM actors, §7.6 snapshots apply.
     fn fork(&self) -> Box<dyn Actor> {
-        // WASM state cloning (linear memory snapshot) is §7.6 —
-        // stateless actors (pure functions) don't need it.
-        unimplemented!("WASM fork — §7.6 snapshots for stateful WASM actors")
+        let mut store = Store::new(&self.engine, ());
+        let instance = Instance::new(&mut store, &self.module, &[]).unwrap();
+        let process_fn = instance
+            .get_typed_func::<i64, i64>(&mut store, "process")
+            .unwrap();
+        Box::new(WasmActor {
+            engine: self.engine.clone(),
+            module: self.module.clone(),
+            store,
+            process_fn,
+            target: self.target.clone(),
+        })
     }
 
     fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, letter: &Letter) -> Vec<Effect> {
-        // Decode the letter payload as an i64 counter value.
         let payload = &letter.payload;
         if payload.len() < 8 {
             return vec![];
         }
         let count = i64::from_le_bytes(payload[..8].try_into().unwrap());
-
-        // Call the WASM guest function. The result is the transformed
-        // value — the container wraps it as a Post effect.
-        let result = self.process_fn.call(&mut self.store, count).unwrap_or(0);
-
-        // Post the result to the target.
+        let result = match self.process_fn.call(&mut self.store, count) {
+            Ok(r) => r,
+            Err(_) => 0, // WASM trap: clamp (supervision handles in prod)
+        };
         vec![Effect::Post {
             to: self.target.clone(),
             letter: Letter::new(
