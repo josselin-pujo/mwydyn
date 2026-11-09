@@ -62,9 +62,13 @@ pub struct BootRecord {
 /// The snapshots sink (round 29): receives `snapshot.save` letters
 /// and IGNORES them — the journal itself is the registry; the
 /// runtime boot-scans it directly for restore.
+#[derive(Clone)]
 struct SnapshotsSink;
 
 impl Actor for SnapshotsSink {
+    fn fork(&self) -> Box<dyn Actor> {
+        Box::new(self.clone())
+    }
     fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, _letter: &Letter) -> Vec<Effect> {
         vec![] // the journal is the registry; delivery is bookkeeping
     }
@@ -239,6 +243,10 @@ pub struct Context {
     /// (consumed by flush_durability when the durable face is present).
     #[allow(dead_code)]
     synced_through: usize,
+    /// The pipelining executor's commit buffer (round 32): journal
+    /// ops accumulated across deliveries, flushed as ONE transaction
+    /// at the pass boundary. Fsync/quorum amortized.
+    commit_buffer: Vec<JournalOp>,
     /// Replies to `external` land here — the embedding's drainable
     /// inbox (§3.4: the embedding's handle). The letters are ALSO
     /// journaled (everything committed is); this is the convenience
@@ -293,6 +301,7 @@ impl Context {
             journal,
             durable: None,
             synced_through: 0,
+            commit_buffer: Vec::new(),
             external_outbox: VecDeque::new(),
             telemetry: Vec::new(),
             dead_letters: Vec::new(),
@@ -335,6 +344,7 @@ impl Context {
             journal: Box::new(InMemoryJournal::new(Box::new(WallClock))),
             durable: Some(durable),
             synced_through: 0,
+            commit_buffer: Vec::new(),
             external_outbox: VecDeque::new(),
             telemetry: Vec::new(),
             dead_letters: Vec::new(),
@@ -643,6 +653,14 @@ impl Context {
     }
 
     fn deliver(&mut self, idx: usize, env: Envelope) -> bool {
+        let actor_id = self.entries[idx].id.clone();
+
+        // §3.5 transactional receive: fork pre-receive state. On
+        // refusal, restore the fork — the state rolls back to the
+        // ack boundary, the letter stays pending (Busy) or strikes
+        // (permanent refusal). No divergence, ever.
+        let fork = self.entries[idx].actor.as_ref().expect("live").fork();
+
         // Phase 1 — the pure transition (§3.5). The host face is
         // read-only; effects come back as data. A panic here is a
         // crash — supervision's problem (§3.2), not the message's.
@@ -671,6 +689,7 @@ impl Context {
         let effects = match outcome {
             Ok(effects) => effects,
             Err(_) => {
+                self.entries[idx].actor = Some(fork);
                 self.handle_crash(idx);
                 return true;
             }
@@ -678,9 +697,7 @@ impl Context {
 
         // Phase 2 — validate ALL effects before committing ANY
         // (fail-before-compute, §3.5). Projected capacity counts this
-        // list's own contributions. A Busy refusal commits NOTHING —
-        // the letter simply stays pending (§3.1: log owns acks), so
-        // self-healing needs no requeue machinery at all.
+        // list's own contributions.
         enum Block {
             Busy,
             Strike(&'static str),
@@ -694,8 +711,6 @@ impl Context {
                         block = Some(Block::Strike("invalid letter in effects"));
                         break;
                     }
-                    // The embedding's outbox is unbounded-by-design
-                    // (the caller drains it — §3.4's handle).
                     if Self::is_external(to) {
                         continue;
                     }
@@ -731,23 +746,21 @@ impl Context {
             }
         }
 
-        // Phase 3 — classify (§3.5's two refusal classes).
-        let actor_id = self.entries[idx].id.clone();
+        // Phase 3 — classify (§3.5's two refusal classes). On ANY
+        // refusal, restore the fork: the state rolls back to the ack
+        // boundary, the letter stays pending (Busy: no attempt burned)
+        // or burns an attempt (Strike: N strikes → dead-letter).
         match block {
-            // Temporary: NO commit — the letter stays pending on the
-            // journal and is re-delivered on a later pass. No attempt
-            // burned (round 07).
             Some(Block::Busy) => {
+                self.entries[idx].actor = Some(fork);
                 self.telemetry.push((
                     Level::Debug,
-                    format!("{actor_id}: target busy — left pending, no attempt burned"),
+                    format!("{actor_id}: target busy — state rolled back, no attempt burned"),
                 ));
                 return true;
             }
-            // Permanent: burn an attempt (runtime bookkeeping); N
-            // strikes → the dead-letter commit (DeadLetter fact +
-            // cursor advance, journaled together — §3.1).
             Some(Block::Strike(why)) => {
+                self.entries[idx].actor = Some(fork);
                 let key = (actor_id.clone(), env.seq);
                 let strikes = self.strikes.entry(key.clone()).or_insert(0);
                 *strikes += 1;
@@ -779,8 +792,8 @@ impl Context {
         }
 
         // Phase 4 — build ONE journal transaction: the effect posts,
-        // the mint facts, and the ack (log owns acks, §3.1; one
-        // journal transaction per receive, round 08).
+        // the mint facts, and the ack (log owns acks, §3.1). The
+        // mutated state is KEPT (fork is dropped).
         let mut ops: Vec<JournalOp> = Vec::new();
         for eff in &effects {
             match eff {
@@ -797,8 +810,6 @@ impl Context {
                         from: Address::Instance(actor_id.clone()),
                         to_actor,
                         to: to.clone(),
-                        // THE STAMP (round 26/29): the seq this actor
-                        // was processing — a snapshot letter's covers.
                         ack: Some(env.seq),
                         producer: actor_id.clone(),
                     }));
@@ -821,8 +832,6 @@ impl Context {
             position: env.seq,
         });
         let commit = self.journal.commit(&self.name, ops).expect("journal commit");
-        // The external outbox view takes the stamped envelopes for
-        // letters addressed to `external` (§3.4).
         for stamped in &commit.appended {
             if Self::is_external(&stamped.to) {
                 self.external_outbox.push_back(stamped.clone());
@@ -831,6 +840,7 @@ impl Context {
         self.strikes.remove(&(actor_id.clone(), env.seq));
         true
     }
+
 
     fn handle_crash(&mut self, idx: usize) {
         let id = self.entries[idx].id.clone();

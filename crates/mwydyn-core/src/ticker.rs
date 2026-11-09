@@ -21,6 +21,7 @@ struct Scheduled {
 
 /// The timer service actor. Timeout idiom = race the tick against
 /// the expected letter; first message wins. There is no other clock.
+#[derive(Clone)]
 pub struct Ticker {
     schedule: Vec<Scheduled>,
 }
@@ -66,6 +67,9 @@ impl Ticker {
 }
 
 impl Actor for Ticker {
+    fn fork(&self) -> Box<dyn Actor> {
+        Box::new(self.clone())
+    }
     fn receive(&mut self, ctx: &MsgCtx, host: &Host, letter: &Letter) -> Vec<Effect> {
         match letter.kind.as_str() {
             TIMER_ARM_KIND => {

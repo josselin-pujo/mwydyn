@@ -214,4 +214,10 @@ pub trait Actor: Send {
     fn wants_poll(&self) -> bool {
         false
     }
+
+    /// Transactional receive support (round 32): fork the current
+    /// state before receive; on refusal, restore the fork. This is
+    /// the shadow-copy that makes busy-refusal + strike state-safe
+    /// for stateful actors.
+    fn fork(&self) -> Box<dyn Actor>;
 }
