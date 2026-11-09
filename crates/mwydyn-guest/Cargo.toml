@@ -1,0 +1,16 @@
+[package]
+name = "mwydyn-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# THE GUEST SDK (round 40) — the wasm-side marshaling the plugin
+# story promised (mwydyn-data IS the codec; this crate adds the
+# barrier ABI glue: scratch management, response blocks, and the
+# ambient-call wrapper). An rlib: guests link it and re-export
+# nothing.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+mwydyn-data = { path = "../mwydyn-data" }

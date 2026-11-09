@@ -7,6 +7,7 @@
 //! indefinite lengths forbidden, unknown tags rejected, key hygiene
 //! enforced, depth limits at decode.
 
+pub mod ambient;
 pub mod barrier;
 pub mod decode;
 pub mod encode;

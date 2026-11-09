@@ -8,6 +8,8 @@ members = [
     "crates/mwydyn-wasm",
     "crates/mwydyn-guest-minimal",
     "crates/mwydyn-guest-counter",
+    "crates/mwydyn-guest",
+    "crates/mwydyn-guest-store",
 ]
 
 [workspace.package]

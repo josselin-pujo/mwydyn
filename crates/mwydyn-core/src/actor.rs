@@ -57,7 +57,7 @@ impl CapRow {
         }
     }
 
-    fn holds(&self, verb: &str, object: &str) -> bool {
+    pub fn holds(&self, verb: &str, object: &str) -> bool {
         self.verb == verb && (self.object == "*" || self.object == object)
     }
 }
@@ -238,4 +238,28 @@ pub trait Actor: Send {
     fn snapshot_state(&mut self) -> Option<Vec<u8>> {
         None
     }
+
+    /// ROUND 40 — THE AMBIENT SURFACE: hand the actor the owned
+    /// pieces it needs to service guest ambient imports (the journal
+    /// read side, the blob face, the context name, and ITS OWN cap
+    /// rows). Called by the pumps right before `receive` (and before
+    /// `init` on the restart paths). Default no-op — native actors
+    /// hold the `Host` face directly; WASM guests consume this at
+    /// instantiation time.
+    fn set_ambient(&mut self, _parts: AmbientParts) {}
+}
+
+/// ROUND 40 — the ambient context for one actor instance. All
+/// handle-shaped (`Arc`), so it clones cheaply per exchange and
+/// crosses threads (the pool builds it from the job's pieces).
+#[derive(Clone)]
+pub struct AmbientParts {
+    /// Read side only (§8.5 CQRS: ambient verbs never commit).
+    pub journal: std::sync::Arc<std::sync::RwLock<Box<dyn crate::journal::JournalFace>>>,
+    pub blobs: std::sync::Arc<dyn crate::blob::BlobFace>,
+    pub context: std::sync::Arc<str>,
+    /// THE ACTOR'S OWN cap rows — ambient verbs are granted, not
+    /// ambient (round 40: the guest's surface is exactly as capable
+    /// as its Spawn declared).
+    pub rows: Vec<CapRow>,
 }

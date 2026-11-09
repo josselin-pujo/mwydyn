@@ -1,0 +1,19 @@
+[package]
+name = "mwydyn-guest-store"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# THE AMBIENT-SURFACE PROOF GUEST (round 40): a letter arrives with
+# `{"body": <bytes>}` — the guest blob_puts it (ambient), blob_gets
+# it back, blob_lens it, and posts a receipt `{"putLen": n, "gotLen":
+# m, "lenOk": bool, "match": bool, "getErr": <code|null>}`. The
+# receipt carries a refusals TOO when spawned uncapped: the negative
+# test proves the guest SEES `Unauthorized` instead of the runtime
+# swallowing anything.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mwydyn-data = { path = "../mwydyn-data" }
+mwydyn-guest = { path = "../mwydyn-guest" }

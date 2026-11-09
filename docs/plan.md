@@ -71,7 +71,9 @@
   (wave dispatch at depth, dispatch-order commits, CQRS face) +
   durability overlay policy, verified at the SQLite boundary;
   §7.6 guest snapshot ABI + overlay-v0/barrier-v0 vectors (round
-  39). Remaining: the ambient host-face import surface.
+  39); the ambient host-face import surface (round 40, `mwydyn.
+  ambient` + the mwydyn-guest SDK). Remaining: ambient conformance
+  vectors (ambient-v0); mwydyn-stdlib (the merge actor).
 - **M4 — the A1 corpus, conformance-green.** `cbor-v1.json` et al.
   pass in `mwydyn-vectors`; every DECIDED spec section has vectors;
   spec v0 declared complete.

@@ -42,6 +42,19 @@ fn jwrite(
     journal.write().unwrap_or_else(|poison| poison.into_inner())
 }
 
+/// ROUND 40 — the ambient surface pieces for one actor exchange:
+/// owned handles (cheap clones), the actor's OWN rows.
+impl Context {
+    fn ambient_parts(&self, idx: usize) -> crate::actor::AmbientParts {
+        crate::actor::AmbientParts {
+            journal: std::sync::Arc::clone(&self.journal),
+            blobs: std::sync::Arc::clone(&self.blobs),
+            context: std::sync::Arc::from(self.name.as_str()),
+            rows: self.entries[idx].rows.clone(),
+        }
+    }
+}
+
 // ------------------------------------------------------------------
 // ROUND 34 — the worker pool's transition tier
 //
@@ -629,6 +642,12 @@ impl Context {
             config: spec.init_spec.clone(),
         };
 
+        actor.set_ambient(crate::actor::AmbientParts {
+            journal: std::sync::Arc::clone(&self.journal),
+            blobs: std::sync::Arc::clone(&self.blobs),
+            context: std::sync::Arc::from(self.name.as_str()),
+            rows: spec.rows.clone(),
+        });
         {
             let jguard = jread(&self.journal);
             let host = Host::new(
@@ -876,6 +895,12 @@ impl Context {
         // refusal, restore the fork — the state rolls back to the
         // ack boundary, the letter stays pending (Busy) or strikes
         // (permanent refusal). No divergence, ever.
+        let parts = self.ambient_parts(idx);
+        self.entries[idx]
+            .actor
+            .as_mut()
+            .expect("live")
+            .set_ambient(parts);
         let fork = self.entries[idx].actor.as_ref().expect("live").fork();
 
         // Phase 1 — the pure transition (§3.5). The host face is
@@ -1145,6 +1170,9 @@ impl Context {
             }
             Supervision::Restart => {
                 let fresh = (self.entries[idx].factory)();
+                let parts = self.ambient_parts(idx);
+                let mut fresh = fresh;
+                fresh.set_ambient(parts);
                 self.entries[idx].actor = Some(fresh);
                 {
                     let entry = &mut self.entries[idx];
@@ -1235,6 +1263,8 @@ impl Context {
         for idx in 0..self.entries.len() {
             if self.entries[idx].actor.is_some() {
                 let fresh = (self.entries[idx].factory)();
+                let mut fresh = fresh;
+                fresh.set_ambient(self.ambient_parts(idx));
                 self.entries[idx].actor = Some(fresh);
                 let entry = &mut self.entries[idx];
                 let jguard = jread(&self.journal);
@@ -1359,6 +1389,9 @@ impl Context {
             // already restored state-as-of-covers; replaying the
             // covered prefix would be redundant).
             let fresh = (self.entries[idx].factory)();
+            let parts = self.ambient_parts(idx);
+            let mut fresh = fresh;
+            fresh.set_ambient(parts);
             self.entries[idx].actor = Some(fresh);
             let jguard = jread(&self.journal);
             {
@@ -1520,6 +1553,14 @@ impl Context {
                     break; // queue closed and drained: the run is over
                 };
                 let WaveJob { seq, mut actor, letter, from, rows, now } = job;
+                // ROUND 40: the ambient surface rides the exchange.
+                let parts = crate::actor::AmbientParts {
+                    journal: std::sync::Arc::clone(&journal),
+                    blobs: std::sync::Arc::clone(&blobs),
+                    context: std::sync::Arc::clone(&name),
+                    rows: rows.clone(),
+                };
+                actor.set_ambient(parts.clone());
                 // Pre-receive copy ON THE WORKER (§3.5's transactional
                 // receive): the rollback state, forked in parallel
                 // with everything else.

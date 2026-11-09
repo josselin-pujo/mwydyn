@@ -165,6 +165,24 @@ drains through the FACE, durability face silent, plain hot silent —
 the round-34 no-op regression gate) + barrier-v0 (canonical
 request/response forms machine-generated + refusal table — any
 second-realm decoder consumes it).
+**ROUND 40: THE AMBIENT HOST-FACE IMPORT SURFACE** (work-notes/40):
+ONE import — `mwydyn.ambient(in_ptr, in_len, out_ptr, out_cap) ->
+written` — canonical CBOR envelope in (`{"verb": ..., <fields>}`),
+`{"ok"|"err"}` out, `-1` = response did not fit (SDK retries with
+bigger scratch). Verbs mirror the native Host face WITH the same cap
+checks (`row.holds`): blob.get/blob.len (blob.read), blob.put
+(blob.write), caps (free) — NO clock verb (§6: the ticker is the
+only wall-clock reader); unknown verbs refused by name. The pumps
+hand each actor its `AmbientParts` (journal read Arc, blob Arc,
+context name, ITS OWN rows) via `Actor::set_ambient` before receive/
+init/fork — granted, never ambient. `mwydyn-guest` = THE GUEST SDK
+(rlib: alloc/dealloc/respond/ambient_call; import gated by
+`#[link(wasm_import_module = "mwydyn")]` — a bare extern lands in
+env; host-target builds get a refusing stub). Proof: ONE store guest,
+capped (put/get/len green, caps lists rows) vs uncapped
+(`putErr: "Unauthorized"` OBSERVED BY THE GUEST, zero fake
+successes). SDK lesson recorded: the scratch write that wasn't
+there — alloc hands ZEROED memory.
 **M1 WASM container RUNS** (work-notes/31): `WasmActor` wrapping
 wasmtime Store + Instance + TypedFunc; ping/pong through Context
 pump at 3434 bounces/s (5000 bounces, 2 WASM actors, RAM tier);

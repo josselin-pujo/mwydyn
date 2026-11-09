@@ -30,9 +30,9 @@
 
 use mwydyn_core::{Actor, Effect, Host, MsgCtx};
 use mwydyn_data::barrier::{BarrierEffect, BarrierRequest};
-use mwydyn_data::{decode, encode, Address, DecodeOptions, Letter};
+use mwydyn_data::{decode, encode, Address, DecodeOptions, Letter, Value};
 use wasmtime::{
-    Config, Engine, Global, Instance, Memory, Module, Store, TypedFunc, Val,
+    Config, Engine, Global, Linker, Memory, Module, Store, TypedFunc, Val,
 };
 
 /// The wasmtime engine — shared across instances, epoch-based
@@ -93,7 +93,7 @@ pub enum GuestMode {
 
 /// A live guest: one store + instance + the barrier ABI's exports.
 struct GuestRt {
-    store: Store<()>,
+    store: Store<Option<mwydyn_core::actor::AmbientParts>>,
     /// The guest's MUTABLE globals (numeric only — the state image
     /// restores these; reference-typed globals have no meaning in a
     /// zero-import guest).
@@ -133,6 +133,9 @@ pub struct WasmActor {
     /// A stateful fork's captured pre-receive image, applied on first
     /// use after a refusal swap-in.
     saved: Option<MemoryImage>,
+    /// ROUND 40 — the ambient surface parts (set by the pumps before
+    /// the exchange; cloned into forks so placeholders inherit).
+    ambient: Option<mwydyn_core::actor::AmbientParts>,
 }
 
 impl WasmActor {
@@ -155,12 +158,12 @@ impl WasmActor {
     /// fixtures); production loads compiled artifacts.
     pub fn from_wat(engine: &WasmEngine, wat: &str) -> Result<WasmActor, anyhow::Error> {
         let module = Module::new(engine.engine(), wat)?;
-        WasmActor::assemble(engine.engine().clone(), module, GuestMode::Stateless, None, None)
+        WasmActor::assemble(engine.engine().clone(), module, GuestMode::Stateless, None, None, None)
     }
 
     fn build(engine: &WasmEngine, wasm: &[u8], mode: GuestMode) -> Result<WasmActor, anyhow::Error> {
         let module = Module::new(engine.engine(), wasm)?;
-        WasmActor::assemble(engine.engine().clone(), module, mode, None, None)
+        WasmActor::assemble(engine.engine().clone(), module, mode, None, None, None)
     }
 
     fn assemble(
@@ -169,6 +172,7 @@ impl WasmActor {
         mode: GuestMode,
         rt: Option<GuestRt>,
         saved: Option<MemoryImage>,
+        ambient: Option<mwydyn_core::actor::AmbientParts>,
     ) -> Result<WasmActor, anyhow::Error> {
         Ok(WasmActor {
             engine,
@@ -176,15 +180,17 @@ impl WasmActor {
             mode,
             rt,
             saved,
+            ambient,
         })
     }
 
-    fn make_rt(&self) -> Result<GuestRt, anyhow::Error> {
-        let mut store = Store::new(&self.engine, ());
+    fn make_rt(&self, parts: Option<mwydyn_core::actor::AmbientParts>) -> Result<GuestRt, anyhow::Error> {
+        let mut store = Store::new(&self.engine, parts);
         // Epoch budget: effectively unbounded here; the production
         // executor arms the deadline per exchange (§6).
         store.set_epoch_deadline(1_000_000);
-        let instance = Instance::new(&mut store, &self.module, &[])?;
+        let linker = build_linker(&self.engine);
+        let instance = linker.instantiate(&mut store, &self.module)?;
         let alloc_fn = instance
             .get_typed_func::<i32, i32>(&mut store, "alloc")
             .map_err(|e| anyhow::anyhow!("no `alloc(i32)→i32` export: {e}"))?;
@@ -230,7 +236,7 @@ impl WasmActor {
     /// memory for a stateless guest.
     fn ensure_ready(&mut self) {
         if self.rt.is_none() {
-            let mut rt = self.make_rt().expect("lazy instantiation");
+            let mut rt = self.make_rt(self.ambient.clone()).expect("lazy instantiation");
             if let Some(img) = self.saved.take() {
                 apply_image(&mut rt, img);
             }
@@ -386,6 +392,7 @@ impl Actor for WasmActor {
                 self.mode,
                 None,
                 saved,
+                self.ambient.clone(),
             )
             .expect("fork assembles the handle"),
         )
@@ -423,6 +430,10 @@ impl Actor for WasmActor {
         self.mode == GuestMode::Stateful
     }
 
+    fn set_ambient(&mut self, parts: mwydyn_core::actor::AmbientParts) {
+        self.ambient = Some(parts);
+    }
+
     /// §7.6 SAVE (round 39): the guest's `snapshot` export returns
     /// its durable state — `Context::snapshot_actor` stores it and
     /// lands the covers-stamped snapshot letter.
@@ -445,6 +456,162 @@ impl Actor for WasmActor {
             .dealloc_fn
             .call(&mut rt.store, (out_ptr, (state_len + 4) as i32));
         Some(state)
+    }
+}
+
+/// ROUND 40 — build the ambient Linker for one instantiation (one
+/// import registration; instantiation is lazy, so this runs once per
+/// guest lifetime).
+fn build_linker(engine: &Engine) -> Linker<Option<mwydyn_core::actor::AmbientParts>> {
+    let mut linker: Linker<Option<mwydyn_core::actor::AmbientParts>> = Linker::new(engine);
+    linker
+        .func_wrap(
+            "mwydyn",
+            "ambient",
+            |mut caller: wasmtime::Caller<'_, Option<mwydyn_core::actor::AmbientParts>>,
+             in_ptr: i32,
+             in_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 { ambient_dispatch(&mut caller, in_ptr, in_len, out_ptr, out_cap) },
+        )
+        .expect("the ambient import registers once");
+    linker
+}
+
+/// The host side of `mwydyn.ambient`: read the canonical-CBOR call,
+/// dispatch with CAP CHECKS against the actor's declared rows, and
+/// write the `{"ok"} | {"err"}` response. Returns bytes written, or
+/// -1 when the caller's buffer is too small.
+fn ambient_dispatch(
+    caller: &mut wasmtime::Caller<'_, Option<mwydyn_core::actor::AmbientParts>>,
+    in_ptr: i32,
+    in_len: i32,
+    out_ptr: i32,
+    out_cap: i32,
+) -> i32 {
+    let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+        return -1;
+    };
+    let mut call_bytes = vec![0u8; in_len.max(0) as usize];
+    if memory
+        .read(&caller, in_ptr.max(0) as usize, &mut call_bytes)
+        .is_err()
+    {
+        return -1;
+    }
+
+    let response = match caller.data() {
+        None => mwydyn_data::ambient::AmbientCall::err_response("Unavailable"),
+        Some(parts) => {
+            let call = decode(&call_bytes, &DecodeOptions::default())
+                .map_err(|_| "BadForm".to_string())
+                .and_then(|v| {
+                    mwydyn_data::ambient::AmbientCall::from_value(&v).map_err(|e| match e {
+                        mwydyn_data::ambient::AmbientError::UnsupportedVerb(_) => {
+                            "UnsupportedVerb".to_string()
+                        }
+                        _ => "BadForm".to_string(),
+                    })
+                });
+            match call {
+                Err(code) => mwydyn_data::ambient::AmbientCall::err_response(&code),
+                Ok(call) => {
+                    let granted =
+                        |domain: &str| parts.rows.iter().any(|row| row.holds(domain, "*"));
+                    match &call.verb {
+                        mwydyn_data::ambient::AmbientVerb::BlobGet { ref_ }
+                            if granted("blob.read") =>
+                        {
+                            match blob_ref_of(ref_) {
+                                Some(r) => match parts.blobs.get(&r) {
+                                    Ok(bytes) => mwydyn_data::ambient::AmbientCall::ok_response(Value::Bytes(bytes)),
+                                    Err(e) => mwydyn_data::ambient::AmbientCall::err_response(blob_err_code(&e)),
+                                },
+                                None => mwydyn_data::ambient::AmbientCall::err_response("BadForm"),
+                            }
+                        }
+                        mwydyn_data::ambient::AmbientVerb::BlobPut {
+                            bytes,
+                            media_type,
+                            ttl_micros,
+                        } if granted("blob.write") => {
+                            match parts.blobs.put(bytes, media_type, *ttl_micros) {
+                                Ok(r) => mwydyn_data::ambient::AmbientCall::ok_response(
+                                    Value::BlobRef {
+                                        digest: r.digest,
+                                        media_type: r.media_type,
+                                        size: r.size,
+                                    },
+                                ),
+                                Err(_) => mwydyn_data::ambient::AmbientCall::err_response("Integrity"),
+                            }
+                        }
+                        mwydyn_data::ambient::AmbientVerb::BlobLen { ref_ }
+                            if granted("blob.read") =>
+                        {
+                            match blob_ref_of(ref_) {
+                                Some(r) => match parts.blobs.len(&r) {
+                                    Ok(n) => mwydyn_data::ambient::AmbientCall::ok_response(Value::Int(n as i64)),
+                                    Err(e) => mwydyn_data::ambient::AmbientCall::err_response(blob_err_code(&e)),
+                                },
+                                None => mwydyn_data::ambient::AmbientCall::err_response("BadForm"),
+                            }
+                        }
+                        mwydyn_data::ambient::AmbientVerb::Caps => {
+                            let rows = parts
+                                .rows
+                                .iter()
+                                .map(|row| {
+                                    Value::map(vec![
+                                        ("verb".into(), Value::Text(row.verb.clone())),
+                                        ("object".into(), Value::Text(row.object.clone())),
+                                    ])
+                                    .expect("fixed hygienic keys")
+                                })
+                                .collect();
+                            mwydyn_data::ambient::AmbientCall::ok_response(Value::Array(rows))
+                        }
+                        // granted() failed: the verb exists, the row
+                        // does not — the native face's exact refusal.
+                        _ => mwydyn_data::ambient::AmbientCall::err_response("Unauthorized"),
+                    }
+                }
+            }
+        }
+    };
+
+    let resp_bytes = encode(&response);
+    if resp_bytes.len() > out_cap.max(0) as usize {
+        return -1;
+    }
+    if memory.write(caller, out_ptr.max(0) as usize, &resp_bytes).is_err() {
+        return -1;
+    }
+    resp_bytes.len() as i32
+}
+
+fn blob_ref_of(v: &Value) -> Option<mwydyn_core::BlobRef> {
+    let Value::BlobRef {
+        digest,
+        media_type,
+        size,
+    } = v
+    else {
+        return None;
+    };
+    Some(mwydyn_core::BlobRef {
+        digest: digest.clone(),
+        media_type: media_type.clone(),
+        size: *size,
+    })
+}
+
+fn blob_err_code(e: &mwydyn_core::BlobAccess) -> &'static str {
+    match e {
+        mwydyn_core::BlobAccess::Unauthorized => "Unauthorized",
+        mwydyn_core::BlobAccess::Missing => "Missing",
+        mwydyn_core::BlobAccess::Integrity => "Integrity",
     }
 }
 

@@ -390,6 +390,19 @@ ceremony without payoff.
   DIRECT — the Bytes-wrapped spelling never matched the scan (found
   round 39: the native restore path ran vacuously) and is
   GC-invisible.
+- **The ambient host-face import surface [DECIDED, round 40]**: ONE
+  import — `mwydyn.ambient(in, in_len, out, out_cap) → written` —
+  canonical CBOR envelope in, `{"ok"} | {"err": code}` out (oversize
+  → `-1`, the SDK retries). Verbs mirror the native Host face with
+  the same cap checks: blob.get/put/len (granted), caps (free) — no
+  clock verb (§6 stands: the ticker is the only wall-clock reader).
+  The pumps hand each actor its `AmbientParts` (journal read side,
+  blob face, context name, the actor's own rows) before receive —
+  ambient verbs are GRANTED, never ambient; refusals are observed
+  by the guest by name. The envelope shapes live in
+  `mwydyn-data/src/ambient.rs`; the guest-side glue is the
+  `mwydyn-guest` SDK crate. Guests WITHOUT the import stay
+  zero-import.
 - **Conformance vectors [round 39]**: overlay-v0 — the three
   overlay roles driven through the FACE (recording skin records;
   durability face silent; plain hot tier silent): the silent-no-op
