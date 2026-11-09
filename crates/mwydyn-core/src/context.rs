@@ -9,6 +9,7 @@
 //! ghosts, readable behind the `ghost.read` cap.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, RwLock};
 
 use mwydyn_data::{Address, DecodeOptions, Envelope, Letter, Value};
 
@@ -17,6 +18,28 @@ use mwydyn_data::{Address, DecodeOptions, Envelope, Letter, Value};
 /// `deliver` (effects, native or WASM) — compose-parity at the gate.
 fn payload_canonical(bytes: &[u8]) -> bool {
     mwydyn_data::decode(bytes, &DecodeOptions::default()).is_ok()
+}
+
+/// ROUND 35 — CQRS access helpers. Poison recovery is
+/// `into_inner()`: actor panics unwinding through a read guard
+/// poison the lock without breaking any journal invariant (reads
+/// mutate nothing; writes are the committer's, panic-free by
+/// construction), so the guard's guard must not wedge the world.
+/// ROUND 35 — CQRS access: the guards are FIELD-scoped (they borrow
+/// only the journal lock, never the whole context) so the committer
+/// can hold `&mut entries` while a read guard is alive. Poison
+/// recovery is `into_inner()`: actor panics unwinding through a
+/// read guard poison the lock without breaking any journal
+/// invariant (reads mutate nothing; writes are the committer's).
+fn jread(
+    journal: &RwLock<Box<dyn JournalFace>>,
+) -> std::sync::RwLockReadGuard<'_, Box<dyn JournalFace>> {
+    journal.read().unwrap_or_else(|poison| poison.into_inner())
+}
+fn jwrite(
+    journal: &RwLock<Box<dyn JournalFace>>,
+) -> std::sync::RwLockWriteGuard<'_, Box<dyn JournalFace>> {
+    journal.write().unwrap_or_else(|poison| poison.into_inner())
 }
 
 // ------------------------------------------------------------------
@@ -47,73 +70,10 @@ struct WaveOutcome {
     rollback: Box<dyn Actor>,
 }
 
-/// Run one wave of transitions on `workers` scoped threads. The host
-/// face is read-only (§3.5: phase 1 touches nothing committable), so
-/// workers share the journal/blob references safely. Results come
-/// back with their dispatch seq — the COMMITTER (caller) decides the
-/// landing order, which is dispatch order.
-fn run_wave(
-    jobs: Vec<WaveJob>,
-    workers: usize,
-    blobs: &dyn crate::blob::BlobFace,
-    journal: &dyn JournalFace,
-    name: &str,
-) -> Vec<WaveOutcome> {
-    use std::sync::{Arc, Mutex};
-    let total = jobs.len();
-    if total == 0 {
-        return Vec::new();
-    }
-    let (job_tx, job_rx) = std::sync::mpsc::channel::<WaveJob>();
-    let (res_tx, res_rx) = std::sync::mpsc::channel::<WaveOutcome>();
-    let job_rx = Arc::new(Mutex::new(job_rx));
-    let n_threads = workers.min(total).max(1);
-
-    std::thread::scope(|s| {
-        for job in jobs {
-            let _ = job_tx.send(job);
-        }
-        drop(job_tx);
-        for _ in 0..n_threads {
-            let rx = Arc::clone(&job_rx);
-            let res_tx = res_tx.clone();
-            s.spawn(move || loop {
-                let Ok(job) = rx.lock().expect("job queue").recv() else {
-                    break; // queue closed and drained: wave over
-                };
-                let WaveJob { seq, mut actor, letter, from, rows, now } = job;
-                // Pre-receive copy ON THE WORKER (§3.5's transactional
-                // receive): forking is part of the transition's cost
-                // and parallelizes with everything else.
-                let rollback = actor.fork();
-                let host = Host::new(blobs, journal, name, &rows, now);
-                let ctx = MsgCtx { from };
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    actor.receive(&ctx, &host, &letter)
-                }));
-                let _ = res_tx.send(WaveOutcome {
-                    seq,
-                    outcome: outcome.map_err(|_| ()),
-                    actor,
-                    rollback,
-                });
-            });
-        }
-        drop(res_tx); // this thread's copy; workers hold clones
-    });
-    // The scope has joined: every worker sent its result before exit.
-    let mut results = Vec::with_capacity(total);
-    for _ in 0..total {
-        if let Ok(r) = res_rx.recv() {
-            results.push(r);
-        }
-    }
-    results
-}
 
 use crate::actor::{Actor, CapRow, Effect, Host, Level, MsgCtx};
 use crate::blob::{BlobFace, BlobRef, RamBlobStore};
-use crate::journal::{InMemoryJournal, JournalError, JournalFace, JournalOp, MintFact, Pending};
+use crate::journal::{InMemoryJournal, JournalError, JournalFace, JournalOp, JournalRead, MintFact, Pending};
 use crate::ticker::Ticker;
 
 /// The embedding's instance id — posts FROM here; replies TO it land
@@ -336,8 +296,15 @@ pub struct Context {
     entries: Vec<Entry>,
     by_name: HashMap<String, usize>,
     by_id: HashMap<String, usize>,
-    blobs: Box<dyn BlobFace>,
-    journal: Box<dyn JournalFace>,
+    /// ROUND 35 — CQRS plumbing: the blob face is shared with the
+    /// pool's worker threads (Arc clones); reads are `&self` with
+    /// provider-internal locking (round 21's bound).
+    blobs: Arc<dyn BlobFace>,
+    /// ROUND 35 — the journal sits behind an RwLock so the executor
+    /// can hand `JournalRead` to parallel workers while the committer
+    /// alone takes write access (single dedicated writer, parallel
+    /// readers — mechanically enforced, no unsafe).
+    journal: Arc<RwLock<Box<dyn JournalFace>>>,
     /// The durability target (§8.5). `None` = RAM tier (hot journal
     /// only, no persistence). `Some` = the durability driver drains
     /// the hot journal's op log to this face on flush (round 31:
@@ -409,8 +376,8 @@ impl Context {
             entries: Vec::new(),
             by_name: HashMap::new(),
             by_id: HashMap::new(),
-            blobs,
-            journal,
+            blobs: Arc::from(blobs),
+            journal: Arc::new(RwLock::new(journal)),
             durable: None,
             synced_through: 0,
             max_ops_per_flush: DEFAULT_MAX_OPS_PER_FLUSH,
@@ -453,8 +420,8 @@ impl Context {
             entries: Vec::new(),
             by_name: HashMap::new(),
             by_id: HashMap::new(),
-            blobs,
-            journal: Box::new(InMemoryJournal::new(Box::new(WallClock))),
+            blobs: Arc::from(blobs),
+            journal: Arc::new(RwLock::new(Box::new(InMemoryJournal::new(Box::new(WallClock))))),
             durable: Some(durable),
             synced_through: 0,
             max_ops_per_flush: DEFAULT_MAX_OPS_PER_FLUSH,
@@ -527,12 +494,12 @@ impl Context {
     /// does not violate the schema-blind core law (round 10).
     pub fn gc(&mut self) -> Result<usize, JournalError> {
         let mut referenced = std::collections::HashSet::new();
-        for lin in self.journal.lineages(&self.name)? {
-            let upto = self.journal.covered(&self.name, lin.id)?;
+        for lin in jread(&self.journal).lineages(&self.name)? {
+            let upto = jread(&self.journal).covered(&self.name, lin.id)?;
             if upto == 0 {
                 continue;
             }
-            for env in self.journal.read(&self.name, lin.id, 1, upto)? {
+            for env in jread(&self.journal).read(&self.name, lin.id, 1, upto)? {
                 // The envelope's canonical form wraps the payload as
                 // opaque bytes; the payload ITSELF is canonical CBOR
                 // carrying the tag-1002 refs.
@@ -589,9 +556,10 @@ impl Context {
         };
 
         {
+            let jguard = jread(&self.journal);
             let host = Host::new(
-                &self.blobs,
-                &*self.journal,
+                &*self.blobs,
+                &**jguard,
                 &self.name,
                 &spec.rows,
                 self.clock.now_micros(),
@@ -652,10 +620,10 @@ impl Context {
         };
         let to_actor = self.entries[idx].id.clone();
         let bound = self.entries[idx].bound;
-        if self.journal.pending_count(&self.name, &to_actor).unwrap_or(0) >= bound {
+        if jread(&self.journal).pending_count(&self.name, &to_actor).unwrap_or(0) >= bound {
             return Verdict::Refused(RefuseReason::Busy);
         }
-        let _ = self.journal.commit(
+        let _ = jwrite(&self.journal).commit(
             &self.name,
             vec![JournalOp::Append(Pending {
                 letter,
@@ -677,10 +645,10 @@ impl Context {
     /// The position comes from the letter's runtime-stamped `ack`
     /// (round 26/29): host-decided, exact, unforgeable.
     fn scan_snapshot(&self, name: &str) -> Option<(BlobRef, u64)> {
-        let active = self.journal.active_lineage(&self.name).ok()?;
-        let covered = self.journal.covered(&self.name, active).ok()?;
+        let active = jread(&self.journal).active_lineage(&self.name).ok()?;
+        let covered = jread(&self.journal).covered(&self.name, active).ok()?;
         let mut found: Option<(BlobRef, u64)> = None;
-        for env in self.journal.read(&self.name, active, 1, covered).ok()? {
+        for env in jread(&self.journal).read(&self.name, active, 1, covered).ok()? {
             if env.letter.kind != SNAPSHOT_SAVE_KIND {
                 continue;
             }
@@ -731,10 +699,7 @@ impl Context {
         for k in 0..n {
             let idx = (self.next_scan + k) % n;
             let entry = &self.entries[idx];
-            let pending = self
-                .journal
-                .pending(&self.name, &entry.id)
-                .unwrap_or_default();
+            let pending = jread(&self.journal).pending(&self.name, &entry.id).unwrap_or_default();
             if entry.actor.is_none() {
                 // Terminal: fail-fast is loud — never silently holding
                 // mail. Strike the pending letters out (journaled).
@@ -769,11 +734,17 @@ impl Context {
                 blobs,
                 entries,
                 clock,
-                journal,
                 ..
             } = self;
+            let jguard = jread(&self.journal);
             let entry = &mut entries[idx];
-            let host = Host::new(blobs, &**journal, name, &entry.rows, clock.now_micros());
+            let host = Host::new(
+                &**blobs,
+                &**jguard,
+                name,
+                &entry.rows,
+                clock.now_micros(),
+            );
             let ctx = MsgCtx {
                 from: env.from.clone(),
             };
@@ -847,7 +818,7 @@ impl Context {
                     let tid = self.entries[tidx].id.clone();
                     let bound = self.entries[tidx].bound;
                     let inflight = projected.entry(tid.clone()).or_insert(0);
-                    let queued = self.journal.pending_count(&self.name, &tid).unwrap_or(0);
+                    let queued = jread(&self.journal).pending_count(&self.name, &tid).unwrap_or(0);
                     if queued + *inflight >= bound {
                         block = Some(Block::Busy);
                         break;
@@ -894,7 +865,7 @@ impl Context {
                     format!("{actor_id}: effects refused ({why}) — attempt {n}"),
                 ));
                 if n >= MAX_ATTEMPTS {
-                    let _ = self.journal.commit(
+                    let _ = jwrite(&self.journal).commit(
                         &self.name,
                         vec![
                             JournalOp::DeadLetter {
@@ -963,10 +934,7 @@ impl Context {
         // DURABILITY IO is pipelined separately, at the overlay
         // boundary (`flush_durability`), never by withholding ops
         // from the hot journal.
-        let commit = self
-            .journal
-            .commit(&self.name, ops)
-            .expect("receive commit");
+        let commit = jwrite(&self.journal).commit(&self.name, ops).expect("receive commit");
         // Populate the external outbox from the commit's appended
         // envelopes addressed to `external` (§3.4's handle).
         for env in &commit.appended {
@@ -982,8 +950,7 @@ impl Context {
     /// (journaled). Used by the serial scan and the pool's wave
     /// composition alike.
     fn drain_terminal(&mut self, idx: usize) -> bool {
-        let pending = self
-            .journal
+        let pending = jread(&self.journal)
             .pending(&self.name, &self.entries[idx].id)
             .unwrap_or_default();
         if pending.is_empty() {
@@ -1000,7 +967,7 @@ impl Context {
                 position: env.seq,
             });
         }
-        let _ = self.journal.commit(&self.name, ops);
+        let _ = jwrite(&self.journal).commit(&self.name, ops);
         self.dead_letters.extend(pending);
         true
     }
@@ -1009,8 +976,7 @@ impl Context {
         let id = self.entries[idx].id.clone();
         let supervision = self.entries[idx].supervision;
         // The front pending letter is the one that crashed us.
-        let front = self
-            .journal
+        let front = jread(&self.journal)
             .pending(&self.name, &id)
             .ok()
             .and_then(|p| p.first().map(|e| e.seq));
@@ -1026,9 +992,10 @@ impl Context {
                 self.entries[idx].actor = Some(fresh);
                 {
                     let entry = &mut self.entries[idx];
+                    let jguard = jread(&self.journal);
                     let host = Host::new(
-                        &self.blobs,
-                        &*self.journal,
+                        &*self.blobs,
+                        &**jguard,
                         &self.name,
                         &entry.rows,
                         self.clock.now_micros(),
@@ -1052,12 +1019,11 @@ impl Context {
                     format!("{id}: crashed — restarted fresh, attempt {attempts}"),
                 ));
                 if let (Some(seq), true) = (front, attempts >= MAX_ATTEMPTS) {
-                    let dead = self
-                        .journal
+                    let dead = jread(&self.journal)
                         .pending(&self.name, &id)
                         .ok()
                         .and_then(|p| p.first().cloned());
-                    let _ = self.journal.commit(
+                    let _ = jwrite(&self.journal).commit(
                         &self.name,
                         vec![
                             JournalOp::DeadLetter {
@@ -1086,11 +1052,11 @@ impl Context {
     /// the entire in-flight window. Returns the number of ops
     /// committed.
     pub fn flush_durability(&mut self) -> Result<usize, JournalError> {
-        let pending_ops = self.journal.unsynced_ops().len();
+        let pending_ops = jread(&self.journal).unsynced_ops().len();
         if pending_ops == 0 {
             return Ok(0);
         }
-        let ops = self.journal.take_ops(pending_ops);
+        let ops = jwrite(&self.journal).take_ops(pending_ops);
         let mut count = 0usize;
         let mut by_ctx: HashMap<String, Vec<JournalOp>> = HashMap::new();
         for (ctx, op) in ops {
@@ -1109,17 +1075,16 @@ impl Context {
     /// Actors restart FRESH: state-as-of-position is the §7.6
     /// snapshot contract; fresh is the M2 approximation (documented).
     pub fn rewind(&mut self, position: u64) -> Result<u64, JournalError> {
-        let c = self
-            .journal
-            .commit(&self.name, vec![JournalOp::Fork { parent_seq: position }])?;
+        let c = jwrite(&self.journal).commit(&self.name, vec![JournalOp::Fork { parent_seq: position }])?;
         for idx in 0..self.entries.len() {
             if self.entries[idx].actor.is_some() {
                 let fresh = (self.entries[idx].factory)();
                 self.entries[idx].actor = Some(fresh);
                 let entry = &mut self.entries[idx];
+                let jguard = jread(&self.journal);
                 let host = Host::new(
-                    &self.blobs,
-                    &*self.journal,
+                    &*self.blobs,
+                    &**jguard,
                     &self.name,
                     &entry.rows,
                     self.clock.now_micros(),
@@ -1204,7 +1169,7 @@ impl Context {
         let mut per_entry: Vec<EntryHistory> = {
             let history: &dyn JournalFace = match &self.durable {
                 Some(d) => &**d,
-                None => &*self.journal,
+                None => &**jread(&self.journal),
             };
             let active = history.active_lineage(&self.name)?;
             let mut per_entry = Vec::with_capacity(self.entries.len());
@@ -1239,17 +1204,17 @@ impl Context {
             // covered prefix would be redundant).
             let fresh = (self.entries[idx].factory)();
             self.entries[idx].actor = Some(fresh);
+            let jguard = jread(&self.journal);
             {
                 let Context {
                     name,
                     blobs,
                     entries,
                     clock,
-                    journal,
                     ..
                 } = self;
                 let entry = &mut entries[idx];
-                let host = Host::new(blobs, &**journal, name, &entry.rows, clock.now_micros());
+                let host = Host::new(&**blobs, &**jguard, name, &entry.rows, clock.now_micros());
                 entry
                     .actor
                     .as_mut()
@@ -1257,20 +1222,20 @@ impl Context {
                     .init(&host, &entry.boot);
             }
             for env in letters {
+                let jguard = jread(&self.journal);
                 let outcome = {
                     let Context {
                         name,
                         blobs,
                         entries,
                         clock,
-                        journal,
                         ..
                     } = self;
                     let entry = &mut entries[idx];
                     // Replay clock: the letter's journaled commit time —
                     // deterministic state reconstruction (§6 honored).
                     let ts = env.commit_ts.unwrap_or_else(|| clock.now_micros());
-                    let host = Host::new(blobs, &**journal, name, &entry.rows, ts);
+                    let host = Host::new(&**blobs, &**jguard, name, &entry.rows, ts);
                     let ctx = MsgCtx {
                         from: env.from.clone(),
                     };
@@ -1349,7 +1314,7 @@ impl Context {
     /// ROUND 34 — drain the overlay when the hot op log reaches the
     /// policy threshold. No-op on the RAM tier (no durable face).
     fn maybe_flush_durability(&mut self) {
-        if self.durable.is_some() && self.journal.unsynced_ops().len() >= self.max_ops_per_flush
+        if self.durable.is_some() && jread(&self.journal).unsynced_ops().len() >= self.max_ops_per_flush
         {
             let _ = self.flush_durability();
         }
@@ -1365,119 +1330,162 @@ impl Context {
     /// validate/classify/buffer tail — never races: it runs on the
     /// committer thread. Journal IO follows the flush policy, never
     /// the exchange count.
+    /// ROUND 35 — THE WORKER POOL (§6, CQRS mechanics): persistent
+    /// worker threads for the whole run — spawned ONCE (Arc handles
+    /// detach them from any borrow of the context), dispatched
+    /// through a job queue. Workers take JOURNAL READ guards for
+    /// their host face (parallel readers); the pump thread is the
+    /// COMMITTER and alone takes write guards between waves (single
+    /// dedicated writer — the RwLock enforces the law mechanically).
+    /// Results apply strictly in DISPATCH order: the journal's total
+    /// order is dispatch order, replay stays deterministic given the
+    /// log (round 21's law).
     fn run_until_idle_pool(&mut self, max_passes: usize) -> PumpStats {
+        use std::sync::mpsc;
         let mut stats = PumpStats::default();
+        let workers = self.workers.max(2);
+        let (job_tx, job_rx) = mpsc::channel::<WaveJob>();
+        let (res_tx, res_rx) = mpsc::channel::<WaveOutcome>();
+        let job_rx = Arc::new(std::sync::Mutex::new(job_rx));
+        let journal = Arc::clone(&self.journal);
+        let blobs = Arc::clone(&self.blobs);
+        let name: Arc<str> = Arc::from(self.name.as_str());
+
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let rx = Arc::clone(&job_rx);
+            let res_tx = res_tx.clone();
+            let journal = Arc::clone(&journal);
+            let blobs = Arc::clone(&blobs);
+            let name = Arc::clone(&name);
+            handles.push(std::thread::spawn(move || loop {
+                let Ok(job) = rx.lock().expect("job queue").recv() else {
+                    break; // queue closed and drained: the run is over
+                };
+                let WaveJob { seq, mut actor, letter, from, rows, now } = job;
+                // Pre-receive copy ON THE WORKER (§3.5's transactional
+                // receive): the rollback state, forked in parallel
+                // with everything else.
+                let rollback = actor.fork();
+                let jguard = jread(&journal);
+                let read_face: &dyn JournalRead = &**jguard;
+                let host = Host::new(&*blobs, read_face, &name, &rows, now);
+                let ctx = MsgCtx { from };
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    actor.receive(&ctx, &host, &letter)
+                }));
+                drop(jguard);
+                let _ = res_tx.send(WaveOutcome {
+                    seq,
+                    outcome: outcome.map_err(|_| ()),
+                    actor,
+                    rollback,
+                });
+            }));
+        }
+        drop(res_tx); // the pump's own copy; the workers hold clones
+
         for _ in 0..max_passes {
             self.inject_polls();
-
-            // Wave composition: round-robin from `next_scan`, one
-            // letter per live actor (single-cursor), up to `workers`
-            // jobs. Terminal entries drain loudly inline.
-            let n = self.entries.len();
-            let mut wave: Vec<(usize, Envelope)> = Vec::new();
-            let mut terminal_drains = 0usize;
-            let mut last_idx: Option<usize> = None;
-            for k in 0..n {
-                let idx = (self.next_scan + k) % n;
-                if self.entries[idx].actor.is_none() {
-                    if self.drain_terminal(idx) {
-                        terminal_drains += 1;
-                        last_idx = Some(idx);
-                    }
-                    continue;
-                }
-                let pending = self
-                    .journal
-                    .pending(&self.name, &self.entries[idx].id)
-                    .unwrap_or_default();
-                if let Some(front) = pending.first() {
-                    wave.push((idx, front.clone()));
-                    last_idx = Some(idx);
-                    if wave.len() >= self.workers {
-                        break;
-                    }
-                }
-            }
-            if let Some(i) = last_idx {
-                self.next_scan = (i + 1) % n;
-            }
-
+            let wave = self.compose_wave(workers);
             if wave.is_empty() {
-                if terminal_drains > 0 {
-                    stats.passes += terminal_drains;
-                    self.maybe_flush_durability();
-                    continue;
-                }
                 break;
             }
+            stats.passes += wave.len();
 
-            stats.passes += wave.len() + terminal_drains;
-            self.run_wave_and_apply(wave);
+            // Stage the jobs: the ORIGINAL actor moves out to the
+            // worker; the entry stands empty mid-wave (nothing scans
+            // between composition and apply — the committer thread is
+            // the only scanner, and it is right here).
+            let mut jobs = Vec::with_capacity(wave.len());
+            for (wave_seq, (idx, env)) in wave.iter().enumerate() {
+                let entry = &mut self.entries[*idx];
+                let moved = entry.actor.take().expect("live");
+                jobs.push(WaveJob {
+                    seq: wave_seq as u64,
+                    actor: moved,
+                    letter: env.letter.clone(),
+                    from: env.from.clone(),
+                    rows: entry.rows.clone(),
+                    now: self.clock.now_micros(),
+                });
+            }
+            for job in jobs {
+                let _ = job_tx.send(job);
+            }
+
+            let mut results: Vec<WaveOutcome> =
+                (0..wave.len()).filter_map(|_| res_rx.recv().ok()).collect();
+            results.sort_by_key(|r| r.seq);
+
+            // THE COMMITTER: dispatch order, no concurrency from here
+            // on. Sorted by seq, results align positionally.
+            for (r, (idx, env)) in results.into_iter().zip(wave) {
+                let WaveOutcome { seq: _, outcome, actor, rollback } = r;
+                match outcome {
+                    Ok(effects) => {
+                        if self.land_effects(idx, &env, effects) {
+                            // Mutation kept: the mutated actor returns;
+                            // the rollback copy is dropped.
+                            self.entries[idx].actor = Some(actor);
+                        } else {
+                            // Refused (busy/strike): restore the
+                            // pre-receive copy — state rolls back to
+                            // the ack boundary.
+                            self.entries[idx].actor = Some(rollback);
+                        }
+                    }
+                    Err(()) => {
+                        // Crash: restore first, then supervision
+                        // decides (restart/fail-fast) — the serial
+                        // path's exact semantics.
+                        self.entries[idx].actor = Some(rollback);
+                        self.handle_crash(idx);
+                    }
+                }
+            }
             self.maybe_flush_durability();
+        }
+        drop(job_tx);
+        for h in handles {
+            let _ = h.join();
         }
         self.maybe_flush_durability();
         stats
     }
 
-    /// Move the wave's actors to workers, run their transitions in
-    /// parallel, then apply the results IN DISPATCH ORDER on this
-    /// (committer) thread.
-    fn run_wave_and_apply(&mut self, wave: Vec<(usize, Envelope)>) {
-        // Stage the jobs: the ORIGINAL actor moves out to the worker;
-        // the pre-receive fork stands in inside the entry (it IS the
-        // rollback state for refusals/crashes).
-        let mut jobs = Vec::with_capacity(wave.len());
-        for (wave_seq, (idx, env)) in wave.iter().enumerate() {
-            let entry = &mut self.entries[*idx];
-            let moved = entry.actor.take().expect("live");
-            // The entry stands EMPTY mid-wave: nothing scans between
-            // composition and apply (the committer thread is the only
-            // scanner, and it is right here). The worker forks the
-            // rollback copy on its own thread.
-            let _ = &entry.id;
-            jobs.push(WaveJob {
-                seq: wave_seq as u64,
-                actor: moved,
-                letter: env.letter.clone(),
-                from: env.from.clone(),
-                rows: entry.rows.clone(),
-                now: self.clock.now_micros(),
-            });
-        }
-
-        let workers = self.workers;
-        let blobs = &*self.blobs;
-        let journal: &dyn JournalFace = &*self.journal;
-        let name: &str = &self.name;
-        let mut results = run_wave(jobs, workers, blobs, journal, name);
-        results.sort_by_key(|r| r.seq);
-
-        // The committer: dispatch order, no concurrency from here on.
-        // Sorted by seq, results align positionally with the wave.
-        for (r, (idx, env)) in results.into_iter().zip(wave) {
-            let WaveOutcome { seq: _, outcome, actor, rollback } = r;
-            match outcome {
-                Ok(effects) => {
-                    if self.land_effects(idx, &env, effects) {
-                        // Mutation kept: the mutated actor returns; the
-                        // worker's rollback copy is dropped.
-                        self.entries[idx].actor = Some(actor);
-                    } else {
-                        // Refused (busy/strike): restore the pre-receive
-                        // copy — the state rolls back to the ack
-                        // boundary.
-                        self.entries[idx].actor = Some(rollback);
-                    }
+    /// Round-robin scan from `next_scan`: one letter per live actor
+    /// (the single-cursor invariant), up to `workers` jobs; terminal
+    /// entries drain loudly inline. Advances `next_scan` past the
+    /// last actioned entry — a perpetually-requeued actor never
+    /// starves its neighbors.
+    fn compose_wave(&mut self, workers: usize) -> Vec<(usize, Envelope)> {
+        let n = self.entries.len();
+        let mut wave: Vec<(usize, Envelope)> = Vec::new();
+        let mut last_idx: Option<usize> = None;
+        for k in 0..n {
+            let idx = (self.next_scan + k) % n;
+            if self.entries[idx].actor.is_none() {
+                if self.drain_terminal(idx) {
+                    last_idx = Some(idx);
                 }
-                Err(()) => {
-                    // Crash: restore the pre-receive copy first, then
-                    // supervision decides (restart/fail-fast) — the
-                    // serial path's exact semantics.
-                    self.entries[idx].actor = Some(rollback);
-                    self.handle_crash(idx);
+                continue;
+            }
+            let pending = jread(&self.journal)
+                .pending(&self.name, &self.entries[idx].id)
+                .unwrap_or_default();
+            if let Some(front) = pending.first() {
+                wave.push((idx, front.clone()));
+                last_idx = Some(idx);
+                if wave.len() >= workers {
+                    break;
                 }
             }
         }
+        if let Some(i) = last_idx {
+            self.next_scan = (i + 1) % n;
+        }
+        wave
     }
 
     /// Poke poll-affine actors while they hold armed work — timers
@@ -1500,7 +1508,7 @@ impl Context {
                 Vec::new(),
             )
             .expect("fixed kind");
-            let _ = self.journal.commit(
+            let _ = jwrite(&self.journal).commit(
                 &self.name,
                 vec![JournalOp::Append(Pending {
                     letter: poll,

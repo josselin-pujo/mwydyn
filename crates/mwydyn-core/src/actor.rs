@@ -4,7 +4,6 @@
 //! import, only reads (§3.5).
 
 use crate::blob::{BlobAccess, BlobRef};
-use crate::journal::JournalFace;
 use mwydyn_data::{Address, Envelope, Letter};
 
 /// Telemetry levels (§3.2: lossy by design, outside the transaction).
@@ -69,7 +68,7 @@ impl CapRow {
 /// have observable effects.
 pub struct Host<'a> {
     blobs: &'a dyn crate::blob::BlobFace,
-    journal: &'a dyn JournalFace,
+    journal: &'a dyn crate::journal::JournalRead,
     context: &'a str,
     caps: &'a [CapRow],
     now_micros: i64,
@@ -78,7 +77,7 @@ pub struct Host<'a> {
 impl<'a> Host<'a> {
     pub(crate) fn new(
         blobs: &'a dyn crate::blob::BlobFace,
-        journal: &'a dyn JournalFace,
+        journal: &'a dyn crate::journal::JournalRead,
         context: &'a str,
         caps: &'a [CapRow],
         now_micros: i64,

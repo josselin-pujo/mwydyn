@@ -88,11 +88,19 @@ found and fixed: group commit was actually per-exchange; the
 overlay was a silent no-op (inherent-vs-trait method shadowing —
 face-level provider tests would have caught it; conformance vectors
 queued). hydrate() reads durable history on the overlay tier.
-Throughput HONEST report: pool parity today (spawn-per-wave eats the
-overlap; fork=120µs + receive=71µs parallelizable vs ~200µs serial
-committer) — persistent executor threads need the §8 face-contract
-decision (commit-&self / read-face split / sanctioned scoped-pool
-unsafe) — OPEN in §7 queue.
+ROUND 35: THE FACE IS CQRS (owner-ratified (b)) — `JournalRead`
+(parallel readers: hosts/workers) split from `JournalCommit` (single
+dedicated writer: the committer); providers implement both halves;
+`Host::new` takes `&dyn JournalRead` (read-side host by type).
+Mechanics: journal = `Arc<RwLock<Box<dyn JournalFace>>>`, blobs =
+`Arc<dyn BlobFace>`; workers spawn ONCE per run (std::thread::spawn,
+Arc handles, zero unsafe), take read guards; the committer alone
+takes write guards between waves; guards are FIELD-scoped fns with
+poison recovery (into_inner). Throughput re-measured: 8 WASM guests
+serial 3,206/s → pool(4) 3,921/s (1.22×, first real speedup);
+cheap-transitions stays serial-favored (pool = the
+expensive-transitions tool; serial pump = deterministic + cheap
+mode). Next lever: pipelining wave N+1 under wave N's apply.
 **M1 WASM container RUNS** (work-notes/31): `WasmActor` wrapping
 wasmtime Store + Instance + TypedFunc; ping/pong through Context
 pump at 3434 bounces/s (5000 bounces, 2 WASM actors, RAM tier);

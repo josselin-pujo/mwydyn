@@ -3,7 +3,7 @@
 //! through the face; that is the substrate-independence proof (§8.5)
 //! and the reason the double implementation cost is worth paying.
 
-use mwydyn_core::journal::{InMemoryJournal, JournalFace, JournalOp, Pending};
+use mwydyn_core::journal::{InMemoryJournal, JournalCommit, JournalFace, JournalOp, JournalRead, Pending};
 use mwydyn_core::ManualClock;
 use mwydyn_data::{Address, Letter};
 

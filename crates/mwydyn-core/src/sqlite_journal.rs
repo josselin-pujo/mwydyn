@@ -22,7 +22,8 @@ use rusqlite::{params, Connection};
 
 use crate::context::ClockFace;
 use crate::journal::{
-    Commit, JournalError, JournalFace, JournalOp, LineageInfo, MintFact,
+    Commit, JournalCommit, JournalError, JournalFace, JournalOp, JournalRead, LineageInfo,
+    MintFact,
 };
 
 pub struct SQLiteJournal {
@@ -244,121 +245,7 @@ fn decode_entry(blob: &[u8], checksum: &str) -> Result<Envelope, JournalError> {
     Ok(env)
 }
 
-impl JournalFace for SQLiteJournal {
-    fn commit(&mut self, context: &str, ops: Vec<JournalOp>) -> Result<Commit, JournalError> {
-        let now = self.clock.now_micros();
-        let mut conn = self.conn.lock().expect("journal mutex poisoned");
-        let tx = conn.transaction().map_err(sql_err)?;
-        let mut active = ensure_context(&tx, context)?;
-        let mut first_seq: Option<u64> = None;
-        let mut count = 0usize;
-        let mut appended: Vec<Envelope> = Vec::new();
-        for op in ops {
-            match op {
-                JournalOp::Append(p) => {
-                    let seq = next_seq(&tx, context, active)?;
-                    let env = Envelope::new(
-                        p.letter.clone(),
-                        seq,
-                        p.from.clone(),
-                        p.to.clone(),
-                        p.ack,
-                        Some(now),
-                        p.producer.clone(),
-                    )
-                    .map_err(|_| JournalError::BadRequest("invalid letter in append"))?;
-                    let checksum = env.checksum();
-                    let blob = encode(&env.to_value());
-                    tx.execute(
-                        "INSERT INTO entries (context, lineage, seq, to_actor, ack, checksum, blob)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        params![context, active, seq, p.to_actor, p.ack.map(|v| v as i64), checksum, blob],
-                    )
-                    .map_err(sql_err)?;
-                    appended.push(env);
-                    first_seq.get_or_insert(seq);
-                    count += 1;
-                }
-                JournalOp::Ack { actor, position } => {
-                    // Log owns acks (§3.1): the cursor advance rides
-                    // this transaction.
-                    tx.execute(
-                        "INSERT INTO cursors (context, lineage, actor, position)
-                         VALUES (?1, ?2, ?3, ?4)
-                         ON CONFLICT(context, lineage, actor)
-                         DO UPDATE SET position=excluded.position",
-                        params![context, active, actor, position],
-                    )
-                    .map_err(sql_err)?;
-                }
-                JournalOp::DeadLetter { actor, why } => {
-                    let data = encode(
-                        &Value::map(vec![
-                            ("actor".into(), Value::Text(actor.clone())),
-                            ("why".into(), Value::Text(why)),
-                        ])
-                        .map_err(|_| JournalError::BadRequest("dead-letter data"))?,
-                    );
-                    tx.execute(
-                        "INSERT INTO facts (context, kind, data) VALUES (?1, 'dead_letter', ?2)",
-                        params![context, data],
-                    )
-                    .map_err(sql_err)?;
-                }
-                JournalOp::Fork { parent_seq } => {
-                    let next: i64 = tx
-                        .query_row(
-                            "SELECT COALESCE(MAX(id), 0) + 1 FROM lineages WHERE context=?1",
-                            params![context],
-                            |r| r.get(0),
-                        )
-                        .map_err(sql_err)?;
-                    tx.execute(
-                        "INSERT INTO lineages (context, id, parent_id, fork_seq)
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params![context, next, active, parent_seq],
-                    )
-                    .map_err(sql_err)?;
-                    tx.execute(
-                        "INSERT INTO meta (context, key, value) VALUES (?1, 'active', ?2)
-                         ON CONFLICT(context, key) DO UPDATE SET value=excluded.value",
-                        params![context, next.to_string()],
-                    )
-                    .map_err(sql_err)?;
-                    active = next as u64;
-                }
-                JournalOp::Mint {
-                    actor,
-                    verb,
-                    object,
-                } => {
-                    let data = encode(
-                        &Value::map(vec![
-                            ("actor".into(), Value::Text(actor)),
-                            ("object".into(), Value::Text(object)),
-                            ("verb".into(), Value::Text(verb)),
-                        ])
-                        .map_err(|_| JournalError::BadRequest("mint fact"))?,
-                    );
-                    tx.execute(
-                        "INSERT INTO facts (context, kind, data) VALUES (?1, 'mint', ?2)",
-                        params![context, data],
-                    )
-                    .map_err(sql_err)?;
-                }
-            }
-        }
-        let lineage = active;
-        tx.commit().map_err(sql_err)?; // THE durability point (§8.2)
-        Ok(Commit {
-            lineage,
-            first_seq: first_seq.unwrap_or(0),
-            count,
-            commit_ts: now,
-            appended,
-        })
-    }
-
+impl JournalRead for SQLiteJournal {
     fn read(
         &self,
         context: &str,
@@ -576,7 +463,127 @@ impl JournalFace for SQLiteJournal {
         let conn = self.conn.lock().expect("journal mutex poisoned");
         covered(&conn, context, lineage)
     }
+
 }
+
+impl JournalCommit for SQLiteJournal {
+    fn commit(&mut self, context: &str, ops: Vec<JournalOp>) -> Result<Commit, JournalError> {
+        let now = self.clock.now_micros();
+        let mut conn = self.conn.lock().expect("journal mutex poisoned");
+        let tx = conn.transaction().map_err(sql_err)?;
+        let mut active = ensure_context(&tx, context)?;
+        let mut first_seq: Option<u64> = None;
+        let mut count = 0usize;
+        let mut appended: Vec<Envelope> = Vec::new();
+        for op in ops {
+            match op {
+                JournalOp::Append(p) => {
+                    let seq = next_seq(&tx, context, active)?;
+                    let env = Envelope::new(
+                        p.letter.clone(),
+                        seq,
+                        p.from.clone(),
+                        p.to.clone(),
+                        p.ack,
+                        Some(now),
+                        p.producer.clone(),
+                    )
+                    .map_err(|_| JournalError::BadRequest("invalid letter in append"))?;
+                    let checksum = env.checksum();
+                    let blob = encode(&env.to_value());
+                    tx.execute(
+                        "INSERT INTO entries (context, lineage, seq, to_actor, ack, checksum, blob)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![context, active, seq, p.to_actor, p.ack.map(|v| v as i64), checksum, blob],
+                    )
+                    .map_err(sql_err)?;
+                    appended.push(env);
+                    first_seq.get_or_insert(seq);
+                    count += 1;
+                }
+                JournalOp::Ack { actor, position } => {
+                    // Log owns acks (§3.1): the cursor advance rides
+                    // this transaction.
+                    tx.execute(
+                        "INSERT INTO cursors (context, lineage, actor, position)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(context, lineage, actor)
+                         DO UPDATE SET position=excluded.position",
+                        params![context, active, actor, position],
+                    )
+                    .map_err(sql_err)?;
+                }
+                JournalOp::DeadLetter { actor, why } => {
+                    let data = encode(
+                        &Value::map(vec![
+                            ("actor".into(), Value::Text(actor.clone())),
+                            ("why".into(), Value::Text(why)),
+                        ])
+                        .map_err(|_| JournalError::BadRequest("dead-letter data"))?,
+                    );
+                    tx.execute(
+                        "INSERT INTO facts (context, kind, data) VALUES (?1, 'dead_letter', ?2)",
+                        params![context, data],
+                    )
+                    .map_err(sql_err)?;
+                }
+                JournalOp::Fork { parent_seq } => {
+                    let next: i64 = tx
+                        .query_row(
+                            "SELECT COALESCE(MAX(id), 0) + 1 FROM lineages WHERE context=?1",
+                            params![context],
+                            |r| r.get(0),
+                        )
+                        .map_err(sql_err)?;
+                    tx.execute(
+                        "INSERT INTO lineages (context, id, parent_id, fork_seq)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![context, next, active, parent_seq],
+                    )
+                    .map_err(sql_err)?;
+                    tx.execute(
+                        "INSERT INTO meta (context, key, value) VALUES (?1, 'active', ?2)
+                         ON CONFLICT(context, key) DO UPDATE SET value=excluded.value",
+                        params![context, next.to_string()],
+                    )
+                    .map_err(sql_err)?;
+                    active = next as u64;
+                }
+                JournalOp::Mint {
+                    actor,
+                    verb,
+                    object,
+                } => {
+                    let data = encode(
+                        &Value::map(vec![
+                            ("actor".into(), Value::Text(actor)),
+                            ("object".into(), Value::Text(object)),
+                            ("verb".into(), Value::Text(verb)),
+                        ])
+                        .map_err(|_| JournalError::BadRequest("mint fact"))?,
+                    );
+                    tx.execute(
+                        "INSERT INTO facts (context, kind, data) VALUES (?1, 'mint', ?2)",
+                        params![context, data],
+                    )
+                    .map_err(sql_err)?;
+                }
+            }
+        }
+        let lineage = active;
+        tx.commit().map_err(sql_err)?; // THE durability point (§8.2)
+        Ok(Commit {
+            lineage,
+            first_seq: first_seq.unwrap_or(0),
+            count,
+            commit_ts: now,
+            appended,
+        })
+    }
+
+}
+
+impl JournalFace for SQLiteJournal {}
 
 impl SQLiteJournal {
     fn cursor_of(

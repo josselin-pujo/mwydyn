@@ -125,6 +125,37 @@ no commit during a wave).
   threshold — the window starves its own drain. The overlay design
   (hot applies immediately) makes the class impossible.
 
+## 7. ROUND 35 — the face split lands (owner: "(b) it is")
+
+Ratified: single dedicated writer, parallel readers — CQRS — "it
+maps well to actual journal implementations". Landed:
+
+- **Face contract**: `JournalRead` (every `&self` method, plus
+  `unsynced_ops`) / `JournalCommit` (`commit`, `take_ops`) /
+  `JournalFace: JournalRead + JournalCommit` — providers implement
+  both halves; the runtime holds either view as needed.
+- **Read-side host**: `Host::new` takes `&dyn JournalRead` — hosts
+  are read-side by posture, now by type.
+- **Mechanics**: `Context::journal` is `Arc<RwLock<Box<dyn
+  JournalFace>>>`, `blobs` an `Arc<dyn BlobFace>` — worker threads
+  are spawned ONCE per run (`std::thread::spawn`, no borrow of the
+  context), clone the Arcs, and live until quiescence. Workers take
+  read guards for their host face; the committer alone takes write
+  guards between waves. THE LOCK ENFORCES THE LAW MECHANICALLY —
+  single writer, parallel readers, no unsafe. Guards are
+  FIELD-scoped free functions (`jread(&self.journal)`) so the
+  committer holds `&mut entries` concurrently with read guards;
+  poison recovery is `into_inner()` (actor panics poison the lock
+  without breaking any journal invariant).
+- **Throughput, re-measured**: 8 WASM guests — serial 3,206/s,
+  pool(4) **3,921/s (1.22×)**, the first real pool speedup. The
+  remaining gap to the ~2× ceiling is wave granularity (compose →
+  dispatch → collect → apply serialize per wave; pipelining wave N+1
+  under wave N's apply is the next lever). Cheap-transitions
+  fan-out stays serial-favored (4,650 vs 4,190) — the pool is the
+  expensive-transitions tool; the serial pump remains the
+  deterministic AND cheap-workload mode.
+
 ## Provenance
 
 Owner: "Go ahead with worker pool, and we must VERIFY that IO

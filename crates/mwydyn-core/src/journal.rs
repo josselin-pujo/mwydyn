@@ -111,8 +111,12 @@ pub struct MintFact {
 /// threads. External providers (NATS/Kafka clients) are threaded
 /// anyway; a provider that cannot cross threads is not a real
 /// provider.
-pub trait JournalFace: Send + Sync {
-    fn commit(&mut self, context: &str, ops: Vec<JournalOp>) -> Result<Commit, JournalError>;
+/// ROUND 35 — THE CQRS FACE SPLIT (owner-ratified): single
+/// dedicated WRITER, parallel READERS — it maps directly onto real
+/// journal implementations (a read view vs a write publisher; the
+/// SQLite connection vs replicated-log appends). Hosts hold a
+/// `&dyn JournalRead`; the committer alone holds write access.
+pub trait JournalRead: Send + Sync {
     /// Ordered replay of a lineage range, INCLUSIVE bounds, verified.
     /// Works on any lineage — live or ghost (§8.3).
     fn read(
@@ -155,11 +159,22 @@ pub trait JournalFace: Send + Sync {
     fn unsynced_ops(&self) -> &[(String, JournalOp)] {
         &[]
     }
+}
+
+/// The write half — ONE committer at a time, by contract (§6: the
+/// pump thread commits in dispatch order; the executor's RwLock
+/// enforces the same law mechanically).
+pub trait JournalCommit: Send {
+    fn commit(&mut self, context: &str, ops: Vec<JournalOp>) -> Result<Commit, JournalError>;
     /// Remove the first `n` ops (post-flush truncate). Round 31.
     fn take_ops(&mut self, _n: usize) -> Vec<(String, JournalOp)> {
         Vec::new()
     }
 }
+
+/// The full face: what providers implement. Every point the runtime
+/// holds (`Context::journal`) is usable as either half.
+pub trait JournalFace: JournalRead + JournalCommit {}
 
 // ------------------------------------------------------ in-memory impl
 
@@ -278,105 +293,7 @@ impl InMemoryJournal {
     }
 }
 
-impl JournalFace for InMemoryJournal {
-    fn commit(&mut self, context: &str, ops: Vec<JournalOp>) -> Result<Commit, JournalError> {
-        let now = self.clock.now_micros();
-        let ctx = self.ctxs.entry(context.to_string()).or_insert_with(CtxJournal::new);
-        let mut first_seq: Option<u64> = None;
-        let mut count = 0usize;
-        let commit_ts = now;
-        let mut appended: Vec<Envelope> = Vec::new();
-        for op in ops {
-            self.op_log.push((context.to_string(), op.clone()));
-            match op {
-                JournalOp::Append(p) => {
-                    let lineage = ctx.active;
-                    let seq = ctx.next_seq(lineage);
-                    let mut env = ctx.stamp(&p, lineage, seq, now)?;
-                    env.ack = p.ack;
-                    appended.push(env.clone());
-                    ctx.entries.insert((lineage, seq), env);
-                    ctx.local_max.insert(lineage, seq);
-                    if !p.to_actor.is_empty() {
-                        ctx.pending
-                            .entry((lineage, p.to_actor.clone()))
-                            .or_default()
-                            .push(seq);
-                    }
-                    first_seq.get_or_insert(seq);
-                    count += 1;
-                }
-                JournalOp::Ack { actor, position } => {
-                    let lineage = ctx.active;
-                    ctx.cursors.insert((lineage, actor.clone()), position);
-                    // Drop everything ≤ position from the pending index.
-                    if let Some(seqs) = ctx.pending.get_mut(&(lineage, actor.clone())) {
-                        while seqs.first().is_some_and(|s| *s <= position) {
-                            seqs.remove(0);
-                        }
-                    }
-                }
-                JournalOp::DeadLetter { actor, .. } => {
-                    // The cursor advance rides the Ack the runtime
-                    // pairs with this fact; the fact itself is the
-                    // audit trail (§3.1: journaled, rewind-consistent).
-                    let _ = actor;
-                }
-                JournalOp::Fork { parent_seq } => {
-                    let parent = ctx.active;
-                    let new_id = (ctx.lineages.len() + 1) as u64;
-                    // Seed the new lineage: cursors clamp to the fork
-                    // point; pending letters within the shared prefix
-                    // carry over (seq numbering continues through it).
-                    let clamped: Vec<((u64, String), u64)> = ctx
-                        .cursors
-                        .iter()
-                        .filter(|((lin, _), _)| *lin == parent)
-                        .map(|((_, actor), c)| ((new_id, actor.clone()), (*c).min(parent_seq)))
-                        .collect();
-                    let carried: Vec<((u64, String), Vec<u64>)> = ctx
-                        .pending
-                        .iter()
-                        .filter(|((lin, _), seqs)| {
-                            *lin == parent && seqs.first().is_some_and(|s| *s <= parent_seq)
-                        })
-                        .map(|((_, actor), seqs)| {
-                            (
-                                (new_id, actor.clone()),
-                                seqs.iter().copied().filter(|s| *s <= parent_seq).collect(),
-                            )
-                        })
-                        .collect();
-                    ctx.lineages.push(Lineage {
-                        parent: Some((parent, parent_seq)),
-                    });
-                    ctx.active = new_id;
-                    for (k, v) in clamped {
-                        ctx.cursors.insert(k, v);
-                    }
-                    for (k, v) in carried {
-                        ctx.pending.insert(k, v);
-                    }
-                }
-                JournalOp::Mint { actor, verb, object } => {
-                    // Journaled for replay (§3.3 tier rule); row
-                    // reconstruction is hydration (round 26).
-                    ctx.mints.push(MintFact {
-                        actor: actor.clone(),
-                        verb: verb.clone(),
-                        object: object.clone(),
-                    });
-                }
-            }
-        }
-        Ok(Commit {
-            lineage: ctx.active,
-            first_seq: first_seq.unwrap_or(0),
-            count,
-            commit_ts,
-            appended,
-        })
-    }
+impl JournalRead for InMemoryJournal {
 
     fn read(
         &self,
@@ -514,14 +431,118 @@ impl JournalFace for InMemoryJournal {
             .collect())
     }
 
-    // ROUND 34 FIX: the overlay drain reads these through the FACE
+    // ROUND 34/35: the overlay drain reads these through the FACE
     // (Box<dyn JournalFace>) — the inherent methods alone were never
     // reachable through the trait object, so flush_durability()
     // silently drained nothing (the trait defaults returned empty).
     fn unsynced_ops(&self) -> &[(String, JournalOp)] {
         InMemoryJournal::unsynced_ops(self)
     }
+}
+
+impl JournalCommit for InMemoryJournal {
+    fn commit(&mut self, context: &str, ops: Vec<JournalOp>) -> Result<Commit, JournalError> {
+        let now = self.clock.now_micros();
+        let ctx = self.ctxs.entry(context.to_string()).or_insert_with(CtxJournal::new);
+        let mut first_seq: Option<u64> = None;
+        let mut count = 0usize;
+        let commit_ts = now;
+        let mut appended: Vec<Envelope> = Vec::new();
+        for op in ops {
+            self.op_log.push((context.to_string(), op.clone()));
+            match op {
+                JournalOp::Append(p) => {
+                    let lineage = ctx.active;
+                    let seq = ctx.next_seq(lineage);
+                    let mut env = ctx.stamp(&p, lineage, seq, now)?;
+                    env.ack = p.ack;
+                    appended.push(env.clone());
+                    ctx.entries.insert((lineage, seq), env);
+                    ctx.local_max.insert(lineage, seq);
+                    if !p.to_actor.is_empty() {
+                        ctx.pending
+                            .entry((lineage, p.to_actor.clone()))
+                            .or_default()
+                            .push(seq);
+                    }
+                    first_seq.get_or_insert(seq);
+                    count += 1;
+                }
+                JournalOp::Ack { actor, position } => {
+                    let lineage = ctx.active;
+                    ctx.cursors.insert((lineage, actor.clone()), position);
+                    // Drop everything ≤ position from the pending index.
+                    if let Some(seqs) = ctx.pending.get_mut(&(lineage, actor.clone())) {
+                        while seqs.first().is_some_and(|s| *s <= position) {
+                            seqs.remove(0);
+                        }
+                    }
+                }
+                JournalOp::DeadLetter { actor, .. } => {
+                    // The cursor advance rides the Ack the runtime
+                    // pairs with this fact; the fact itself is the
+                    // audit trail (§3.1: journaled, rewind-consistent).
+                    let _ = actor;
+                }
+                JournalOp::Fork { parent_seq } => {
+                    let parent = ctx.active;
+                    let new_id = (ctx.lineages.len() + 1) as u64;
+                    // Seed the new lineage: cursors clamp to the fork
+                    // point; pending letters within the shared prefix
+                    // carry over (seq numbering continues through it).
+                    let clamped: Vec<((u64, String), u64)> = ctx
+                        .cursors
+                        .iter()
+                        .filter(|((lin, _), _)| *lin == parent)
+                        .map(|((_, actor), c)| ((new_id, actor.clone()), (*c).min(parent_seq)))
+                        .collect();
+                    let carried: Vec<((u64, String), Vec<u64>)> = ctx
+                        .pending
+                        .iter()
+                        .filter(|((lin, _), seqs)| {
+                            *lin == parent && seqs.first().is_some_and(|s| *s <= parent_seq)
+                        })
+                        .map(|((_, actor), seqs)| {
+                            (
+                                (new_id, actor.clone()),
+                                seqs.iter().copied().filter(|s| *s <= parent_seq).collect(),
+                            )
+                        })
+                        .collect();
+                    ctx.lineages.push(Lineage {
+                        parent: Some((parent, parent_seq)),
+                    });
+                    ctx.active = new_id;
+                    for (k, v) in clamped {
+                        ctx.cursors.insert(k, v);
+                    }
+                    for (k, v) in carried {
+                        ctx.pending.insert(k, v);
+                    }
+                }
+                JournalOp::Mint { actor, verb, object } => {
+                    // Journaled for replay (§3.3 tier rule); row
+                    // reconstruction is hydration (round 26).
+                    ctx.mints.push(MintFact {
+                        actor: actor.clone(),
+                        verb: verb.clone(),
+                        object: object.clone(),
+                    });
+                }
+            }
+        }
+        Ok(Commit {
+            lineage: ctx.active,
+            first_seq: first_seq.unwrap_or(0),
+            count,
+            commit_ts,
+            appended,
+        })
+    }
+
     fn take_ops(&mut self, n: usize) -> Vec<(String, JournalOp)> {
         InMemoryJournal::take_ops(self, n)
     }
 }
+
+impl JournalFace for InMemoryJournal {}

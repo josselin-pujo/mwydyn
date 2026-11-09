@@ -16,7 +16,10 @@
 
 #![cfg(feature = "sqlite")]
 
-use mwydyn_core::journal::{Commit, JournalError, JournalOp, JournalFace, LineageInfo, MintFact};
+use mwydyn_core::journal::{
+    Commit, JournalCommit, JournalError, JournalFace, JournalOp, JournalRead, LineageInfo,
+    MintFact,
+};
 use mwydyn_core::sqlite_journal::SQLiteJournal;
 use mwydyn_core::{Actor, Context, Effect, Host, MsgCtx, Spawn};
 use mwydyn_data::{decode, Address, DecodeOptions, Letter, Value};
@@ -45,13 +48,8 @@ struct CountingDurable {
     batches: Arc<Mutex<Vec<usize>>>,
 }
 
-impl JournalFace for CountingDurable {
-    fn commit(&mut self, context: &str, ops: Vec<JournalOp>) -> Result<Commit, JournalError> {
-        self.commits.fetch_add(1, Ordering::SeqCst);
-        self.ops.fetch_add(ops.len(), Ordering::SeqCst);
-        self.batches.lock().unwrap().push(ops.len());
-        self.inner.commit(context, ops)
-    }
+impl JournalRead for CountingDurable {
+
     fn read(
         &self,
         context: &str,
@@ -100,6 +98,18 @@ impl JournalFace for CountingDurable {
         self.inner.mints(context, actor)
     }
 }
+
+impl JournalCommit for CountingDurable {
+    fn commit(&mut self, context: &str, ops: Vec<JournalOp>) -> Result<Commit, JournalError> {
+        self.commits.fetch_add(1, Ordering::SeqCst);
+        self.ops.fetch_add(ops.len(), Ordering::SeqCst);
+        self.batches.lock().unwrap().push(ops.len());
+        self.inner.commit(context, ops)
+    }
+}
+
+impl JournalFace for CountingDurable {}
+
 
 struct Bouncer {
     target: Address,

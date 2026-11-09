@@ -346,10 +346,16 @@ ceremony without payoff.
   recorded; the journal is law; whatever happens that creates the
   stream of events that are journaled is what it is"* (owner).
   Replay follows the journal and is deterministic given it. The
-  mechanism (LANDED, round 34): `ctx.workers(n)` — wave dispatch,
-  workers run phase-1 transitions (forks included) concurrently; the
-  pump thread commits in DISPATCH order — parallelism with
-  deterministic commit order. The serial `run_until_idle` pump stays
+  mechanism (LANDED, round 34/35): `ctx.workers(n)` — wave dispatch,
+  persistent workers run phase-1 transitions (forks included)
+  concurrently; the pump thread commits in DISPATCH order —
+  parallelism with deterministic commit order. **THE FACE IS
+  CQRS [owner-ratified, round 35]**: `JournalRead` (parallel
+  readers — hosts, workers) / `JournalCommit` (single dedicated
+  writer — the committer) / `JournalFace` = both. It maps directly
+  onto real journal implementations (read view vs write publisher);
+  in-core, an `Arc<RwLock<...>>` enforces the law mechanically —
+  no unsafe. The serial `run_until_idle` pump stays
   forever as the deterministic mode (tests, replay verification).
   Readiness bounds bought now: `JournalFace: Send+Sync` (external
   providers are threaded — one that cannot cross threads is not a
