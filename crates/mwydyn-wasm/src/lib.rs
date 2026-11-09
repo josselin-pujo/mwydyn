@@ -7,4 +7,3 @@ pub mod container;
 pub mod engine;
 
 pub use container::WasmEngine;
-pub use engine::*;

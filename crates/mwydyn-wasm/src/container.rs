@@ -3,7 +3,7 @@
 //! with native actors: same `receive(ctx, letter) → effects` shape,
 //! WASM execution realm.
 
-use wasmtime::{Config, Engine, Module};
+use wasmtime::{Config, Engine};
 
 /// The wasmtime engine — shared across instances, epoch-based
 /// deadline enforcement, component model.
