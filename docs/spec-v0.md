@@ -373,7 +373,15 @@ ceremony without payoff.
   refused at admission (`post`) and in the effects phase — native
   and WASM identically; the journal never stores undecodable
   payloads. Payloads are canonical CBOR *always*; a letter carrying
-  nothing uses `Null` (0xF6), not zero bytes.
+  nothing uses `Null` (0xF6), not zero bytes. WHY (owner-ratified,
+  round 33 arbitration): the runtime itself is a payload consumer —
+  GC's tag-1002 reachability sweep is deep pointer inspection, and
+  an undecodable payload's refs are invisible, so a referenced blob
+  could be collected. The boundary line: **VALIDITY** (canonical
+  CBOR or not) is the data model's, host-enforced; **SHAPE** (what
+  fields/types the payload carries) is the kind's contract,
+  registry/consumer-side — never the host's. A letter of any kind
+  with payload `Null` passes the wall.
 - Runtime: **wasmtime**. Budget knobs proven in A1's spike [A1:40]:
   epoch-interrupt wall clock, memory limiter, optional fuel.
 - Stateful actors choose:

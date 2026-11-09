@@ -114,9 +114,37 @@ Raw-wasmtime probe (throwaway test, deleted after) isolated the
 guest as healthy — the discipline: probe the layer below before
 blaming the layer above.
 
+## 8. Arbitration addendum — the wall's boundary line
+
+Owner asked for precision: "the outside decoder only validates that
+the envelope is valid CBOR right, internal payloads are seen as
+bytea fields... those may well be under a contract, but it's not
+the host responsibility to enforce it."
+
+Answer, ratified: YES at the shape layer (payload is `Value::Bytes`,
+never interpreted by the envelope decoder), but the wall enforces
+one step beyond envelope validity — payload bytes must decode under
+the canonical CBOR profile. That is the DATA-MODEL layer, not the
+contract layer. Owner then recalled the load-bearing reason:
+"forgot about the introspection need for blobrefs... no choice
+there if we want deep pointer inspection."
+
+The line, for the record:
+- **VALIDITY** (is this canonical CBOR?) — host territory,
+  mwydyn-data's domain, enforced at post + Phase 2.
+- **SHAPE** (what the payload means) — the kind's contract,
+  registry/consumer-side; the host never checks fields, types, or
+  structure; a letter of any kind with payload `Null` passes.
+
+The wall exists because the runtime is ITSELF a payload consumer:
+GC's tag-1002 sweep, snapshot restore scans, ticker arm parsing.
+Without the wall, undecodable payloads make blob refs invisible to
+GC reachability — a correctness hole, not a style choice.
+
 ## Provenance
 
 Owner ratifications, 2026-11-09: "canonical CBOR bytes are the WASM
 ABI, plugin SDK provides the wasm side marshall/unmarshall code"
 + "let's get rid of WIT once and for all... pure wasm-unknown-
-unknown which is more widely supported anyways".
+unknown which is more widely supported anyways" + the validity/
+shape arbitration above.
