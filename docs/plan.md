@@ -67,12 +67,11 @@
   §7.6 (snapshot contract) lands here, nearly free per round 07.
 - **M3 — blob persistence + reference-aware GC.** Sweep only above
   the live watermark; loud-missing proven by vectors.
-- **Executor + IO pipelining (round 34, LANDED):** worker pool
-  (wave dispatch, dispatch-order commits) + durability overlay
-  policy (`max_ops_per_flush` + `flush_durability()` barrier),
-  verified at the SQLite boundary. Remaining: persistent executor
-  threads (needs the §8 face-contract decision); barrier
-  conformance vectors; the ambient host-face import surface.
+- **Executor + IO pipelining (rounds 34–38, LANDED):** worker pool
+  (wave dispatch at depth, dispatch-order commits, CQRS face) +
+  durability overlay policy, verified at the SQLite boundary;
+  §7.6 guest snapshot ABI + overlay-v0/barrier-v0 vectors (round
+  39). Remaining: the ambient host-face import surface.
 - **M4 — the A1 corpus, conformance-green.** `cbor-v1.json` et al.
   pass in `mwydyn-vectors`; every DECIDED spec section has vectors;
   spec v0 declared complete.

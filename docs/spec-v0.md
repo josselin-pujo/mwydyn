@@ -380,8 +380,22 @@ ceremony without payoff.
   declaration is the contract; it rides as
   `Actor::fork_carries_state`). Stateful guests keep state in
   linear memory (restored byte-exact); mutable globals revert to
-  initial values on a restore (documented). Guest snapshot
-  restore-from-boot (§7.6) needs a restore ABI hook — queued. The serial `run_until_idle` pump stays
+  initial values on a restore (documented). **The §7.6 snapshot ABI
+  [DECIDED, round 39]**: guests MAY export `restore(ptr, len)`
+  (boot snapshot → blob_get host-side, blob.read cap-gated, loud
+  refusal to drop durable state silently) and `snapshot()`
+  (`Context::snapshot_actor`: runtime blob_put + covers-stamped
+  snapshot letter — covers = the actor's cursor; ref rides a DIRECT
+  BlobRef, GC-visible). Snapshot refs in payload letters ride
+  DIRECT — the Bytes-wrapped spelling never matched the scan (found
+  round 39: the native restore path ran vacuously) and is
+  GC-invisible.
+- **Conformance vectors [round 39]**: overlay-v0 — the three
+  overlay roles driven through the FACE (recording skin records;
+  durability face silent; plain hot tier silent): the silent-no-op
+  regression gate. barrier-v0 — canonical request/response forms
+  (machine-generated hex) + the refusal table, consumable by any
+  second-realm decoder. The serial `run_until_idle` pump stays
   forever as the deterministic mode (tests, replay verification).
   Readiness bounds bought now: `JournalFace: Send+Sync` (external
   providers are threaded — one that cannot cross threads is not a

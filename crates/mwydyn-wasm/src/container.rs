@@ -102,6 +102,14 @@ struct GuestRt {
     dealloc_fn: TypedFunc<(i32, i32), ()>,
     process_fn: TypedFunc<(i32, i32), i32>,
     memory: Memory,
+    /// ROUND 39 — THE §7.6 SNAPSHOT ABI (both optional):
+    /// `restore(state_ptr, state_len)` — applied at init when the
+    /// boot carries a snapshot ref (the container blob_gets host-side
+    /// and hands the bytes over).
+    restore_fn: Option<TypedFunc<(i32, i32), ()>>,
+    /// `snapshot() -> resp_ptr` (`[u32 len][state bytes]`) — the
+    /// embedding's `Context::snapshot_actor` pulls durable state.
+    snapshot_fn: Option<TypedFunc<(), i32>>,
 }
 
 /// The pre-receive state image of a stateful guest (round 37).
@@ -201,6 +209,10 @@ impl WasmActor {
                 }
             }
         }
+        let restore_fn = instance
+            .get_typed_func::<(i32, i32), ()>(&mut store, "restore")
+            .ok();
+        let snapshot_fn = instance.get_typed_func::<(), i32>(&mut store, "snapshot").ok();
         Ok(GuestRt {
             store,
             globals,
@@ -208,6 +220,8 @@ impl WasmActor {
             dealloc_fn,
             process_fn,
             memory,
+            restore_fn,
+            snapshot_fn,
         })
     }
 
@@ -244,6 +258,29 @@ impl WasmActor {
             let img = img.clone();
             apply_image(rt, img);
         }
+    }
+
+    /// Apply a raw state blob through the guest's `restore` export.
+    fn apply_state_blob(&mut self, state: &[u8]) {
+        let rt = self.rt.as_mut().expect("ensure_ready ran");
+        let Some(restore_fn) = rt.restore_fn.clone() else {
+            panic!(
+                "wasm barrier: the boot carries a snapshot but the guest exports no `restore` —                  refusing to silently drop durable state"
+            );
+        };
+        let ptr = rt
+            .alloc_fn
+            .call(&mut rt.store, state.len().max(1) as i32)
+            .unwrap_or_else(|e| panic!("wasm barrier: restore alloc trap: {e}"));
+        rt.memory
+            .write(&mut rt.store, ptr as usize, state)
+            .unwrap_or_else(|e| panic!("wasm barrier: restore write: {e}"));
+        restore_fn
+            .call(&mut rt.store, (ptr, state.len() as i32))
+            .unwrap_or_else(|e| panic!("wasm barrier: restore trap: {e}"));
+        let _ = rt
+            .dealloc_fn
+            .call(&mut rt.store, (ptr, state.len().max(1) as i32));
     }
 
     /// One barrier exchange: canonical request in, wall-validated
@@ -364,12 +401,50 @@ impl Actor for WasmActor {
         self.barrier_exchange(&req)
     }
 
+    /// §7.6 RESTORE (round 39): the boot carries a durable snapshot
+    /// ref — blob_get host-side, bytes over the barrier through the
+    /// guest's `restore` export. Loud if the guest cannot receive
+    /// durable state. A missing snapshot inits nothing (fresh).
+    fn init(&mut self, host: &Host, boot: &mwydyn_core::BootRecord) {
+        if let Some(r) = &boot.snapshot {
+            let state = host
+                .blob_get(r)
+                .unwrap_or_else(|e| panic!("wasm barrier: boot snapshot unreadable: {e:?}"));
+            self.ensure_ready();
+            self.apply_state_blob(&state);
+        }
+    }
+
     /// THE DECLARATION, stated to the core (round 37): stateless
     /// guests' forks carry no state — the runtime keeps the mutated
     /// instance on refusal ("just reused"); stateful guests get the
     /// memory image restored.
     fn fork_carries_state(&self) -> bool {
         self.mode == GuestMode::Stateful
+    }
+
+    /// §7.6 SAVE (round 39): the guest's `snapshot` export returns
+    /// its durable state — `Context::snapshot_actor` stores it and
+    /// lands the covers-stamped snapshot letter.
+    fn snapshot_state(&mut self) -> Option<Vec<u8>> {
+        let rt = self.rt.as_mut()?;
+        let snapshot_fn = rt.snapshot_fn.clone()?;
+        let out_ptr = snapshot_fn
+            .call(&mut rt.store, ())
+            .unwrap_or_else(|e| panic!("wasm barrier: snapshot trap: {e}"));
+        let mut len_buf = [0u8; 4];
+        rt.memory
+            .read(&rt.store, out_ptr as usize, &mut len_buf)
+            .unwrap_or_else(|e| panic!("wasm barrier: snapshot prefix: {e}"));
+        let state_len = u32::from_le_bytes(len_buf) as usize;
+        let mut state = vec![0u8; state_len];
+        rt.memory
+            .read(&rt.store, out_ptr as usize + 4, &mut state)
+            .unwrap_or_else(|e| panic!("wasm barrier: snapshot bytes: {e}"));
+        let _ = rt
+            .dealloc_fn
+            .call(&mut rt.store, (out_ptr, (state_len + 4) as i32));
+        Some(state)
     }
 }
 

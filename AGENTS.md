@@ -148,6 +148,23 @@ residual. Throughput ledger 34→38: echo 3.0k→30.8k, WASM 2.5k→9.5k.
 Next levers (not urgent): cheaper stage (letter/rows clone per job
 ≈5.8µs/ex), ack front-shift, worker count — the features board is
 the better spend.
+**ROUND 39: §7.6 GUEST SNAPSHOT ABI + CONFORMANCE VECTORS**
+(work-notes/39): guests MAY export `restore(ptr,len)` (boot
+snapshot → blob_get host-side, CAP-GATED blob.read, loud if missing
+with state present) and `snapshot()` (`Context::snapshot_actor` →
+`Actor::snapshot_state` face → runtime blob_put → covers-stamped
+snapshot letter, covers = actor's cursor; ref rides DIRECT BlobRef —
+GC-VISIBLE). LATENT BUG FOUND+FIXED: the native counter's Bytes-
+wrapped ref NEVER matched scan_snapshot — restore ran VACUOUSLY
+(full replay reached the same count; the test couldn't tell) and the
+snapshot blob was GC-INVISIBLE; test now hardened with a RESTORED
+marker. Durable round-trip proof: 3 letters → snapshot → pending →
+die → reopen(SQLite) → boot restore → hydrate skips covered prefix →
+exactly-once (count=4). VECTORS: overlay-v0 (recording skin records/
+drains through the FACE, durability face silent, plain hot silent —
+the round-34 no-op regression gate) + barrier-v0 (canonical
+request/response forms machine-generated + refusal table — any
+second-realm decoder consumes it).
 **M1 WASM container RUNS** (work-notes/31): `WasmActor` wrapping
 wasmtime Store + Instance + TypedFunc; ping/pong through Context
 pump at 3434 bounces/s (5000 bounces, 2 WASM actors, RAM tier);

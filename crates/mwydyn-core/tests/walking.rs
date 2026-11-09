@@ -1256,6 +1256,10 @@ struct GhostPutter {
 struct StatefulCounter {
     count: u64,
     _snapshots: Address,
+    /// Set by init when the snapshot restore ran — surfaced as an
+    /// Emit on the next receive (the test asserts it: restore must be
+    /// distinguishable from full-replay luck).
+    restored: bool,
 }
 
 impl Actor for StatefulCounter {
@@ -1269,6 +1273,11 @@ impl Actor for StatefulCounter {
                 if let Ok(s) = String::from_utf8(bytes) {
                     if let Some(n) = s.strip_prefix("count=").and_then(|v| v.parse().ok()) {
                         self.count = n;
+                        // ROUND 39: announce it on the next receive —
+                        // the test must tell restore-from-snapshot
+                        // apart from full-replay luck (which used to
+                        // reach the same count vacuously).
+                        self.restored = true;
                     }
                 }
             }
@@ -1280,10 +1289,18 @@ impl Actor for StatefulCounter {
             "test.add@1" => {
                 let add: u64 = payload_text(&letter.payload).parse().unwrap_or(0);
                 self.count += add;
-                vec![Effect::Emit {
+                let mut out = vec![Effect::Emit {
                     level: Level::Info,
                     message: format!("COUNT:{}", self.count),
-                }]
+                }];
+                if self.restored {
+                    self.restored = false;
+                    out.push(Effect::Emit {
+                        level: Level::Info,
+                        message: "RESTORED".into(),
+                    });
+                }
+                out
             }
             "test.snap@1" => {
                 // Serialize state → blob (eager, ref in hand) →
@@ -1299,13 +1316,14 @@ impl Actor for StatefulCounter {
                     media_type: r.media_type.clone(),
                     size: r.size,
                 };
+                // ROUND 39: the ref rides DIRECT (a BlobRef value) —
+                // the Bytes-wrapped spelling was GC-invisible AND
+                // never matched the scan (the restore path ran
+                // vacuously until this fix).
                 let payload = mwydyn_data::encode(
                     &Value::map(vec![
                         ("name".into(), Value::Text("counter".into())),
-                        (
-                            "ref".into(),
-                            Value::Bytes(mwydyn_data::encode(&ref_value)),
-                        ),
+                        ("ref".into(), ref_value),
                     ])
                     .expect("keys"),
                 );
@@ -1350,6 +1368,7 @@ fn snapshot_letter_survives_reopen_and_restores_state_and_cursor() {
                 Box::new(|| {
                     Box::new(StatefulCounter {
                         count: 0,
+                        restored: false,
                         _snapshots: addr("c1", mwydyn_core::SNAPSHOTS),
                     })
                 }),
@@ -1394,6 +1413,13 @@ fn snapshot_letter_survives_reopen_and_restores_state_and_cursor() {
     // 1 + 2 restored FROM THE SNAPSHOT; 3 delivered live from the
     // pending journal letter. No double-count, no loss.
     assert!(ctx2.telemetry().iter().any(|(_, m)| m == "COUNT:6"));
+    // ROUND 39: the RESTORE path must have run — before this, the
+    // test passed vacuously (full replay reached the same count).
+    assert!(
+        ctx2.telemetry().iter().any(|(_, m)| m == "RESTORED"),
+        "the snapshot restore ran (not full-replay luck): {:?}",
+        ctx2.telemetry()
+    );
     let _ = std::fs::remove_file(&journal_path);
     let _ = std::fs::remove_file(&blob_path);
     let _ = std::fs::remove_file(journal_path.with_extension("sqlite-wal"));

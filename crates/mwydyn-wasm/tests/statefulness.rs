@@ -100,3 +100,106 @@ fn declared_stateless_dirty_state_is_the_authors_problem() {
         "stateless: refused attempts DIRTY the guest (1 per strike attempt + the honest one) — no rollback owed"
     );
 }
+
+/// §7.6 THE FULL DURABLE ROUND TRIP for a STATEFUL WASM guest
+/// (round 39): work → snapshot_actor (runtime save, covers-stamped)
+/// → more work → die → reopen on the durable tier → spawn under the
+/// same name (boot scans the snapshot) → hydrate (replay skips the
+/// covered prefix) → the pending letter lands → EXACTLY-ONCE.
+#[test]
+fn stateful_guest_snapshot_survives_reopen_and_is_exactly_once() {
+    if !Path::new("tests/artifacts/mwydyn_guest_counter.wasm").exists() {
+        eprintln!("SKIP: guest artifact missing — run scripts/build-guest.sh");
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let journal_path = dir.join(format!("mwydyn-sfw-{}-{:?}.sqlite", std::process::id(), line!()));
+    let blob_path = dir.join(format!("mwydyn-sfb-{}-{:?}.sqlite", std::process::id(), line!()));
+    let _ = std::fs::remove_file(&journal_path);
+    let _ = std::fs::remove_file(&blob_path);
+
+    let spawn_ctr = |ctx: &mut Context| {
+        let wasm_path = Path::new("tests/artifacts/mwydyn_guest_counter.wasm")
+            .to_path_buf();
+        ctx.spawn(
+            Spawn::new(
+                Some("ctr"),
+                Box::new(move || {
+                    let wasm = std::fs::read(&wasm_path).expect("artifact");
+                    let engine = WasmEngine::new().expect("engine");
+                    Box::new(WasmActor::from_compiled_stateful(&engine, &wasm).expect("guest"))
+                }),
+            )
+            // The capability model holds at the barrier: restoring
+            // your own durable state is a blob READ, and reads are
+            // granted, not ambient.
+            .rows(vec![mwydyn_core::CapRow::new("blob.read", "*")])
+            .supervision(Supervision::Restart),
+        )
+        .unwrap();
+    };
+
+    // ---- ctx1 (durable tier): 3 letters → snapshot → 1 letter → die.
+    {
+        let mut ctx = Context::with_stores(
+            "sf",
+            Box::new(
+                mwydyn_core::SQLiteJournal::open(&journal_path, Box::new(mwydyn_core::ManualClock(0)))
+                    .unwrap(),
+            ),
+            Box::new(mwydyn_core::SQLiteBlobStore::open(&blob_path).unwrap()),
+        );
+        spawn_ctr(&mut ctx);
+        for _ in 0..3 {
+            ctx.post(&addr("sf", "ctr"), kick("external"), vec![]);
+            ctx.run_until_idle(100);
+        }
+        assert_eq!(drain_counts(&mut ctx), vec![1, 2, 3]);
+        ctx.snapshot_actor("ctr").expect("runtime save");
+        // one more letter, PENDING across the death (never delivered)
+        ctx.post(&addr("sf", "ctr"), kick("external"), vec![]);
+        drop(ctx); // ---- the death line ----
+    }
+
+    // ---- ctx2: reopen, spawn under the same name (boot scans the
+    // snapshot letter — covers stamped at save time), hydrate
+    // (replay skips the covered prefix), the pending letter lands.
+    {
+        let mut ctx = Context::with_stores(
+            "sf",
+            Box::new(
+                mwydyn_core::SQLiteJournal::open(&journal_path, Box::new(mwydyn_core::ManualClock(0)))
+                    .unwrap(),
+            ),
+            Box::new(mwydyn_core::SQLiteBlobStore::open(&blob_path).unwrap()),
+        );
+        spawn_ctr(&mut ctx);
+        let replays = ctx.hydrate().expect("hydrate");
+        ctx.run_until_idle(200);
+        let counts = drain_counts(&mut ctx);
+        assert_eq!(
+            counts,
+            vec![4],
+            "exactly-once: restored 3 + the ONE pending letter (replays covered the prefix: {replays})"
+        );
+        let _ = std::fs::remove_file(&journal_path);
+        let _ = std::fs::remove_file(&blob_path);
+        let _ = std::fs::remove_file(journal_path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(journal_path.with_extension("sqlite-shm"));
+    }
+}
+
+fn drain_counts(ctx: &mut Context) -> Vec<i64> {
+    let mut counts = Vec::new();
+    for d in ctx.drain_external() {
+        let v = decode(&d.letter.payload, &DecodeOptions::default()).expect("canonical");
+        let Value::Map(pairs) = v else {
+            panic!("receipt is a map");
+        };
+        match pairs.iter().find(|(k, _)| k == "count").map(|(_, v)| v) {
+            Some(Value::Int(n)) => counts.push(*n),
+            other => panic!("receipt count: {other:?}"),
+        }
+    }
+    counts
+}

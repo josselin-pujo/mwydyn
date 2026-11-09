@@ -229,4 +229,13 @@ pub trait Actor: Send {
     fn fork_carries_state(&self) -> bool {
         true
     }
+
+    /// §7.6 SAVE (round 39): the actor's durable state for a
+    /// runtime-driven snapshot (`Context::snapshot_actor` stores it
+    /// and lands the covers-stamped letter). `None` = the actor has
+    /// nothing to say (the default; WASM guests answer when they
+    /// export the `snapshot` ABI hook).
+    fn snapshot_state(&mut self) -> Option<Vec<u8>> {
+        None
+    }
 }

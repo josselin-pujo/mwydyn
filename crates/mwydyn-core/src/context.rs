@@ -331,6 +331,24 @@ struct Entry {
     replay_from: u64,
 }
 
+/// ROUND 39 — `snapshot_actor`'s refusal reasons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotError {
+    UnknownActor,
+    /// The actor's `snapshot_state` face returned nothing (a guest
+    /// without the `snapshot` export).
+    NoSnapshotState,
+    BlobStore,
+    BadLetter,
+    Journal(JournalError),
+}
+
+impl From<JournalError> for SnapshotError {
+    fn from(e: JournalError) -> Self {
+        SnapshotError::Journal(e)
+    }
+}
+
 pub struct Context {
     name: String,
     entries: Vec<Entry>,
@@ -700,6 +718,72 @@ impl Context {
     /// WHICH SNAPSHOTS EXIST (round 19's discipline, applied).
     /// The position comes from the letter's runtime-stamped `ack`
     /// (round 26/29): host-decided, exact, unforgeable.
+    /// §7.6 SAVE, RUNTIME-DRIVEN (round 39): pull the actor's
+    /// durable state through its `snapshot_state` face, store it as a
+    /// blob (the RUNTIME's own ambient power — caps are for actors),
+    /// and land the snapshot letter with the runtime-stamped
+    /// `covers` = the actor's CURRENT cursor — everything acked
+    /// before this call is inside the snapshot. The ref rides as a
+    /// DIRECT BlobRef (GC-visible: the letter protects the blob).
+    /// Reopen + spawn under the same NAME restores it (round 39's
+    /// scan accepts this letter; `covers + 1` seeds `replay_from`).
+    pub fn snapshot_actor(&mut self, name: &str) -> Result<(), SnapshotError> {
+        let idx = *self
+            .by_name
+            .get(name)
+            .ok_or(SnapshotError::UnknownActor)?;
+        let state = self.entries[idx]
+            .actor
+            .as_mut()
+            .and_then(|a| a.snapshot_state())
+            .ok_or(SnapshotError::NoSnapshotState)?;
+        let r = self
+            .blobs
+            .put(&state, "application/x-mwydyn-state", None)
+            .map_err(|_| SnapshotError::BlobStore)?;
+        let actor_id = self.entries[idx].id.clone();
+        let active = jread(&self.journal).active_lineage(&self.name)?;
+        let covers =
+            jread(&self.journal).cursor(&self.name, active, &actor_id)?.unwrap_or(0);
+        let ref_value = Value::BlobRef {
+            digest: r.digest,
+            media_type: r.media_type,
+            size: r.size,
+        };
+        // The EXACT payload shape scan_snapshot matches (round 39: the
+        // ref is a DIRECT BlobRef — GC-visible, and the wrapped
+        // spelling never matched).
+        let payload = mwydyn_data::encode(
+            &Value::map(vec![
+                ("name".into(), Value::Text(name.into())),
+                ("ref".into(), ref_value),
+            ])
+            .expect("fixed hygienic keys"),
+        );
+        let letter = Letter::new(SNAPSHOT_SAVE_KIND, payload, None, None, vec![])
+            .map_err(|_| SnapshotError::BadLetter)?;
+        let sink_addr = Address::Named {
+            context: self.name.clone(),
+            name: crate::context::SNAPSHOTS.into(),
+        };
+        let sink_actor = self
+            .resolve(&sink_addr)
+            .map(|tidx| self.entries[tidx].id.clone())
+            .expect("the snapshots sink is a runtime-reserved spawn");
+        let _ = jwrite(&self.journal).commit(
+            &self.name,
+            vec![JournalOp::Append(Pending {
+                letter,
+                from: Address::Instance(actor_id),
+                to_actor: sink_actor,
+                to: sink_addr,
+                ack: Some(covers),
+                producer: name.to_string(),
+            })],
+        )?;
+        Ok(())
+    }
+
     fn scan_snapshot(&self, name: &str) -> Option<(BlobRef, u64)> {
         let active = jread(&self.journal).active_lineage(&self.name).ok()?;
         let covered = jread(&self.journal).covered(&self.name, active).ok()?;
@@ -722,9 +806,22 @@ impl Context {
             if !matches {
                 continue;
             }
-            let Some(Value::BlobRef { digest, media_type, size }) =
-                pairs.iter().find(|(k, _)| k == "ref").map(|(_, v)| v)
-            else {
+            let ref_field = pairs.iter().find(|(k, _)| k == "ref").map(|(_, v)| v);
+            // ROUND 39: the ref rides as a DIRECT BlobRef (GC-visible —
+            // the snapshot blob must be reachable from the letter) and
+            // is also accepted Bytes-wrapped (the native counter's
+            // original spelling, which never matched — the snapshot
+            // restore path ran vacuously until this fix).
+            let ref_value = match ref_field {
+                Some(v @ Value::BlobRef { .. }) => Some(v.clone()),
+                Some(Value::Bytes(wrapped)) => mwydyn_data::decode(
+                    wrapped,
+                    &mwydyn_data::DecodeOptions::default(),
+                )
+                .ok(),
+                _ => None,
+            };
+            let Some(Value::BlobRef { digest, media_type, size }) = ref_value else {
                 continue;
             };
             // The covers position: the runtime-stamped ack (None here
@@ -736,7 +833,7 @@ impl Context {
                 BlobRef {
                     digest: digest.clone(),
                     media_type: media_type.clone(),
-                    size: *size,
+                    size,
                 },
                 ack,
             ));

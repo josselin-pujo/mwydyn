@@ -1,0 +1,116 @@
+{
+  "cases": [
+    {
+      "canonical_hex": "a36176016466726f6da2646e616d656470696e6767636f6e74657874627070666c6574746572a5646b696e6471746573742e776f726b2d6f726465724031656361757365f6677061796c6f616449a1686f72646572490169617574686f726974798169706f73743a776f726b6b636f7272656c6174696f6e6465782d31",
+      "from": {
+        "context": "pp",
+        "name": "ping"
+      },
+      "letter": {
+        "authority": [
+          "post:work"
+        ],
+        "cause": null,
+        "correlation": "ex-1",
+        "kind": "test.work-order@1",
+        "payload_hex": "a1686f726465724901"
+      },
+      "name": "request-canonical",
+      "side": "request",
+      "v": 1
+    },
+    {
+      "expect_error": "BadVersion",
+      "from": {
+        "context": "pp",
+        "name": "ping"
+      },
+      "letter": {
+        "authority": [
+          "post:work"
+        ],
+        "cause": null,
+        "correlation": "ex-1",
+        "kind": "test.work-order@1",
+        "payload_hex": "a1686f726465724901"
+      },
+      "name": "request-bad-version",
+      "side": "request",
+      "v": 99
+    },
+    {
+      "expect_error": "BadForm",
+      "from": {
+        "context": "pp",
+        "name": "ping"
+      },
+      "name": "request-missing-letter",
+      "side": "request",
+      "v": 1
+    },
+    {
+      "canonical_hex": "81a164706f7374a262746fa2646e616d6564706f6e6767636f6e74657874627070666c6574746572a5646b696e646e746573742e726563656970744031656361757365f6677061796c6f616450a165746f74616cfb402400000000000069617574686f72697479806b636f7272656c6174696f6e6465782d31",
+      "effects": [
+        {
+          "post": {
+            "letter": {
+              "authority": [],
+              "cause": null,
+              "correlation": "ex-1",
+              "kind": "test.receipt@1",
+              "payload_hex": "a165746f74616cfb4024000000000000"
+            },
+            "to": {
+              "context": "pp",
+              "name": "pong"
+            }
+          }
+        }
+      ],
+      "name": "response-canonical",
+      "side": "response"
+    },
+    {
+      "effects": [
+        {
+          "blog": {}
+        }
+      ],
+      "expect_error": "UnsupportedVerb",
+      "name": "response-unknown-verb",
+      "side": "response"
+    },
+    {
+      "effects": [
+        {
+          "mint": {},
+          "post": {
+            "letter": {
+              "authority": [
+                "post:work"
+              ],
+              "cause": null,
+              "correlation": "ex-1",
+              "kind": "test.work-order@1",
+              "payload_hex": "a1686f726465724901"
+            },
+            "to": {
+              "context": "pp",
+              "name": "pong"
+            }
+          }
+        }
+      ],
+      "expect_error": "BadForm",
+      "name": "response-two-entry-record",
+      "side": "response"
+    },
+    {
+      "canonical_hex": "ff00",
+      "expect_error": "Decode",
+      "name": "response-garbage-bytes",
+      "side": "response"
+    }
+  ],
+  "profile": "barrier-v0"
+}

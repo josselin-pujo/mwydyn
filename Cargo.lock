@@ -736,6 +736,7 @@ dependencies = [
 name = "mwydyn-vectors"
 version = "0.1.0"
 dependencies = [
+ "mwydyn-core",
  "mwydyn-data",
  "serde",
  "serde_json",

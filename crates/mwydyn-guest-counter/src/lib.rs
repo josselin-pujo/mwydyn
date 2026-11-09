@@ -22,6 +22,28 @@ fn field<'a>(pairs: &'a [(String, Value)], name: &str) -> Option<&'a Value> {
     pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v)
 }
 
+/// §7.6 RESTORE ABI (round 39): the container blob_gets the boot's
+/// snapshot host-side and hands the bytes over. The counter's state
+/// format is its own: 4 bytes, little-endian u32.
+/// # Safety
+/// `ptr` must point to `len` readable bytes in guest linear memory.
+#[no_mangle]
+pub unsafe extern "C" fn restore(ptr: *const u8, len: usize) {
+    assert!(len == 4, "guest-counter: snapshot is 4 bytes");
+    let b = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let n = u32::from_le_bytes(b.try_into().expect("4 bytes"));
+    COUNTER.store(n, Ordering::SeqCst);
+}
+
+/// §7.6 SAVE ABI (round 39): return `[u32 len][state bytes]` —
+/// `Context::snapshot_actor` stores it and lands the covers-stamped
+/// letter.
+#[no_mangle]
+pub extern "C" fn snapshot() -> *mut u8 {
+    let n = COUNTER.load(Ordering::SeqCst);
+    respond(&n.to_le_bytes())
+}
+
 #[no_mangle]
 pub extern "C" fn alloc(len: usize) -> *mut u8 {
     assert!(len > 0);
@@ -81,9 +103,13 @@ pub unsafe extern "C" fn process(req_ptr: *const u8, req_len: usize) -> *mut u8 
     let effects = [BarrierEffect::Post { to: dest, letter }];
     let v = Value::Array(effects.iter().map(|e| e.to_value()).collect());
 
-    let bytes = encode(&v);
+    respond(&encode(&v))
+}
+
+/// Wrap response bytes in the ABI block `[u32 le len][bytes]`.
+fn respond(bytes: &[u8]) -> *mut u8 {
     let mut buf = Vec::with_capacity(4 + bytes.len());
     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&bytes);
+    buf.extend_from_slice(bytes);
     Box::into_raw(buf.into_boxed_slice()) as *mut u8
 }
