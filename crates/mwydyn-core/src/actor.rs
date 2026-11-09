@@ -219,4 +219,14 @@ pub trait Actor: Send {
     /// the shadow-copy that makes busy-refusal + strike state-safe
     /// for stateful actors.
     fn fork(&self) -> Box<dyn Actor>;
+
+    /// ROUND 37 — does the fork carry the actor's live state (so a
+    /// refusal must restore it)? Default true. Actors that DECLARE
+    /// themselves stateless may return false: on refusal the runtime
+    /// then keeps the mutated instance ("just reused" — dirty state
+    /// across refusals is the author's declared problem, and the
+    /// restore copy is not even materialized).
+    fn fork_carries_state(&self) -> bool {
+        true
+    }
 }

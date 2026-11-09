@@ -361,7 +361,21 @@ ceremony without payoff.
   Amdahl bound (`PumpStats.profile`), and throughput work follows it:
   cheap-transition workloads are committer-bound (cheaper apply/
   compose is the lever), expensive-transition workloads are
-  worker-bound (the fork cost is the lever — §7.6 snapshots). The serial `run_until_idle` pump stays
+  worker-bound (the fork cost is the lever — §7.6 snapshots).
+- **The WASM guest lifecycle [DECIDED, round 37]**: instances are
+  PERSISTENT — created lazily on first use, reused across letters;
+  per-letter instantiation is gone. The transactional guarantee
+  follows the guest's DECLARED statefulness: **Stateful** guests get
+  pre-receive LINEAR-MEMORY IMAGE rollback (fork captures memory;
+  refusal applies it to a fresh instance — exactly-once internal
+  state, doubled footprint while the image lives); **Stateless**
+  guests are just reused — the mutated instance stays on refusal,
+  no once-and-only-once internal-state guarantee (the author's
+  declaration is the contract; it rides as
+  `Actor::fork_carries_state`). Stateful guests keep state in
+  linear memory (restored byte-exact); mutable globals revert to
+  initial values on a restore (documented). Guest snapshot
+  restore-from-boot (§7.6) needs a restore ABI hook — queued. The serial `run_until_idle` pump stays
   forever as the deterministic mode (tests, replay verification).
   Readiness bounds bought now: `JournalFace: Send+Sync` (external
   providers are threaded — one that cannot cross threads is not a

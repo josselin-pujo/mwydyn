@@ -820,8 +820,11 @@ impl Context {
         };
         // Phases 2-4 — validate, classify, buffer (round 34: shared
         // with the worker pool's committer). On refusal the fork
-        // replaces the mutated state.
-        if !self.land_effects(idx, &env, effects) {
+        // replaces the mutated state — UNLESS the actor declared its
+        // forks stateless (round 37): "just reused", the dirty
+        // instance stays and the fork is dropped.
+        let kept = self.land_effects(idx, &env, effects);
+        if !kept && self.entries[idx].actor.as_ref().expect("live").fork_carries_state() {
             self.entries[idx].actor = Some(fork);
         }
         true
@@ -1535,12 +1538,18 @@ impl Context {
                         .remove(&idx)
                         .expect("staged envelope present");
                     let WaveOutcome { seq: _, outcome, actor, rollback } = r;
+                    // ROUND 37: the actor's declaration decides the
+                    // refusal semantics — stateful forks restore the
+                    // pre-receive copy; stateless ones keep the
+                    // mutated instance ("just reused").
+                    let carries = actor.as_ref().fork_carries_state();
                     match outcome {
                         Ok(effects) => {
-                            if self.land_effects(idx, &env, effects) {
-                                // Mutation kept: the mutated actor
-                                // returns; the rollback copy is
-                                // dropped.
+                            let kept = self.land_effects(idx, &env, effects);
+                            if kept || !carries {
+                                // Mutation kept — or declared
+                                // stateless: the dirty instance stays
+                                // and the rollback copy dies.
                                 self.entries[idx].actor = Some(actor);
                             } else {
                                 // Refused (busy/strike): restore the

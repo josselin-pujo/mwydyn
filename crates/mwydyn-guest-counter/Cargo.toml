@@ -1,0 +1,16 @@
+[package]
+name = "mwydyn-guest-counter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The DECLARED-STATEFULNESS test guest (round 37): a static counter
+# in linear memory — the memory image restores it byte-exact. Built
+# the same way as guest-minimal (wasm32-unknown-unknown, zero
+# imports); the same artifact serves both lifecycle modes, and the
+# tests prove the declaration changes what the runtime owes.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mwydyn-data = { path = "../mwydyn-data" }

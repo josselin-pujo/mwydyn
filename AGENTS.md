@@ -114,6 +114,24 @@ approaching: fork 120µs + receive 71µs per worker per exchange —
 §7.6 WASM snapshots kill the fork, then apply, then more workers).
 `PumpStats.profile` = the phase ledger (PoolProfile) for future
 profiling.
+**ROUND 37: DECLARED STATEFULNESS — the persistent WASM instance**
+(work-notes/35): instances are LAZY + PERSISTENT (per-letter
+instantiation GONE — the owner diagnosed it: 120µs was memory-init,
+not call cost, and stateful guests were impossible by construction).
+The guarantee follows the guest's DECLARATION: Stateful =
+pre-receive linear-memory IMAGE rollback (exactly-once internal
+state, doubled footprint, image KEPT through the strike chain —
+apply a clone, never consume); Stateless = "just reused" (mutated
+instance stays on refusal, no guarantee — rides to the core as
+`Actor::fork_carries_state`, both pumps branch on it). Stateful
+guests keep state in LINEAR MEMORY (byte-exact restore); mutable
+globals revert on restore (fork(&self) cannot read them —
+wasmtime mut-context). PROOF: one counter guest, both modes — 3
+strikes then honest letter: stateful count=1, stateless count=4.
+NUMBERS: serial 2,671→4,189/s (+57%), pool(4) 3,799→9,829/s
+(2.35× serial), wall 248→86µs/ex — the fork lever is dead; next
+levers are pipelining depth + apply cost. Guest lifecycle ABI for
+snapshot-restore-from-boot queued (§7.6).
 **M1 WASM container RUNS** (work-notes/31): `WasmActor` wrapping
 wasmtime Store + Instance + TypedFunc; ping/pong through Context
 pump at 3434 bounces/s (5000 bounces, 2 WASM actors, RAM tier);

@@ -712,6 +712,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mwydyn-guest-counter"
+version = "0.1.0"
+dependencies = [
+ "mwydyn-data",
+]
+
+[[package]]
 name = "mwydyn-guest-minimal"
 version = "0.1.0"
 dependencies = [

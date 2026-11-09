@@ -7,6 +7,7 @@ members = [
     "crates/mwydyn-vectors",
     "crates/mwydyn-wasm",
     "crates/mwydyn-guest-minimal",
+    "crates/mwydyn-guest-counter",
 ]
 
 [workspace.package]
