@@ -10,6 +10,7 @@ members = [
     "crates/mwydyn-guest-counter",
     "crates/mwydyn-guest",
     "crates/mwydyn-guest-store",
+    "crates/mwydyn-guest-dedup",
 ]
 
 [workspace.package]

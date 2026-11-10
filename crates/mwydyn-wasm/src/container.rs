@@ -76,13 +76,16 @@ impl std::ops::Deref for WasmEngine {
     }
 }
 
-/// ROUND 37 — THE GUEST'S DECLARED STATEFULNESS. The guarantee the
-/// runtime owes follows this declaration, not the runtime's guess.
+/// ROUNDS 37+41 — THE GUEST'S DECLARED STATEFULNESS, read from the
+/// guest itself (`mwydyn_decl`, §9.2). The guarantee the runtime
+/// owes follows this declaration, not the runtime's guess — and not
+/// the embedder's either (round 41: no override exists).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuestMode {
     /// Persistent instance reused across letters; on refusal the
-    /// instance is re-created fresh. The author declares there is no
-    /// internal state a refused transition may dirty.
+    /// instance is simply reused, mutated state and all. The author
+    /// declares there is no internal state a refused transition must
+    /// not dirty.
     Stateless,
     /// Pre-receive MEMORY IMAGE rollback: linear memory + numeric
     /// globals captured at fork, applied to a fresh instance on
@@ -139,31 +142,61 @@ pub struct WasmActor {
 }
 
 impl WasmActor {
-    /// From compiled guest bytes — STATELESS lifecycle (the default:
-    /// fresh instance on refusal, no internal-state guarantee).
+    /// From compiled guest bytes. §9.2 (round 41): the GUEST owns
+    /// its statefulness declaration — `mwydyn_decl() -> u32` bit 0,
+    /// read once here (one throwaway instantiation). Absent export
+    /// = Stateless by omission (hand-rolled guests, WAT fixtures).
+    /// There is no embedder override: composing a stateful guest
+    /// stateless would silently break the author's exactly-once
+    /// expectation — refused by removing the path.
     pub fn from_compiled(engine: &WasmEngine, wasm: &[u8]) -> Result<WasmActor, anyhow::Error> {
-        WasmActor::build(engine, wasm, GuestMode::Stateless)
-    }
-
-    /// From compiled guest bytes — STATEFUL lifecycle: memory-image
-    /// rollback on refusal (doubled footprint while the image lives).
-    pub fn from_compiled_stateful(
-        engine: &WasmEngine,
-        wasm: &[u8],
-    ) -> Result<WasmActor, anyhow::Error> {
-        WasmActor::build(engine, wasm, GuestMode::Stateful)
+        let module = Module::new(engine.engine(), wasm)?;
+        let mode = WasmActor::probe_mode(engine, &module)?;
+        WasmActor::assemble(
+            engine.engine().clone(),
+            module,
+            mode,
+            None,
+            None,
+            None,
+        )
     }
 
     /// From WAT text — the test-guest path (ABI mechanics, byzantine
-    /// fixtures); production loads compiled artifacts.
+    /// fixtures); production loads compiled artifacts. Same law as
+    /// [`WasmActor::from_compiled`]: the declaration is read from
+    /// the guest text, whatever form it arrives in.
     pub fn from_wat(engine: &WasmEngine, wat: &str) -> Result<WasmActor, anyhow::Error> {
         let module = Module::new(engine.engine(), wat)?;
-        WasmActor::assemble(engine.engine().clone(), module, GuestMode::Stateless, None, None, None)
+        let mode = WasmActor::probe_mode(engine, &module)?;
+        WasmActor::assemble(
+            engine.engine().clone(),
+            module,
+            mode,
+            None,
+            None,
+            None,
+        )
     }
 
-    fn build(engine: &WasmEngine, wasm: &[u8], mode: GuestMode) -> Result<WasmActor, anyhow::Error> {
-        let module = Module::new(engine.engine(), wasm)?;
-        WasmActor::assemble(engine.engine().clone(), module, mode, None, None, None)
+    /// §9.2 — read `mwydyn_decl` from one throwaway instantiation.
+    fn probe_mode(engine: &WasmEngine, module: &Module) -> Result<GuestMode, anyhow::Error> {
+        let mut store = Store::new(engine.engine(), None);
+        // Epoch budget mirrors make_rt: the probe only reads a flag,
+        // but the default deadline is EXPIRED (an instant trap).
+        store.set_epoch_deadline(1_000_000);
+        let linker = build_linker(engine.engine());
+        let instance = linker.instantiate(&mut store, module)?;
+        let declared = instance
+            .get_typed_func::<(), i32>(&mut store, "mwydyn_decl")
+            .ok()
+            .map(|f| f.call(&mut store, ()))
+            .transpose()?;
+        Ok(if declared.unwrap_or(0) & 1 == 1 {
+            GuestMode::Stateful
+        } else {
+            GuestMode::Stateless
+        })
     }
 
     fn assemble(

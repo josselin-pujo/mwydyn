@@ -4,13 +4,12 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-# The DECLARED-STATEFULNESS test guest (round 37): a static counter
-# in linear memory — the memory image restores it byte-exact. Built
-# the same way as guest-minimal (wasm32-unknown-unknown, zero
-# imports); the same artifact serves both lifecycle modes, and the
-# tests prove the declaration changes what the runtime owes.
+# The DURABLE example guest (rounds 37+39, SDK since 41): state in
+# the actor struct, rollback + snapshots by declaration —
+# durable_entry! owns the exports and the mwydyn_decl flag. Built
+# via scripts/build-guest.sh (wasm32-unknown-unknown).
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-mwydyn-data = { path = "../mwydyn-data" }
+mwydyn-guest = { path = "../mwydyn-guest" }

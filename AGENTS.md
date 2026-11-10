@@ -24,10 +24,12 @@ core and the union goes behind layers.
 - Spec text cites provenance: `[A1:NN]` = Athena1 `work-notes/NN`;
   recovered specs, not recovered code.
 
-## State (2026-11-08)
+## State (2026-11-10)
 
-Rounds done: charter (00) through schema registry (10) — spec §1–§6
-all DECIDED. Owner's laws on record: clock obliviousness, "CBOR is
+Rounds done: charter (00) through the Rust guest SDK (41) — spec
+§1–§6 plus §8 journal and §9 WASM guest contract all DECIDED (§9
+consolidates rounds 33/37/39/40/41). Owner's laws on record: clock
+obliviousness, "CBOR is
 just CBOR", no reply-to, atomicity-only-inside-clock-domains,
 refusal-minting-is-policy, compose-parity (native and WASM actors
 compose identically), faces-not-implementations (journal/blob),
@@ -165,6 +167,46 @@ drains through the FACE, durability face silent, plain hot silent —
 the round-34 no-op regression gate) + barrier-v0 (canonical
 request/response forms machine-generated + refusal table — any
 second-realm decoder consumes it).
+**ROUND 41: THE RUST GUEST SDK — THE GUEST DECLARES, THE RUNTIME
+OBEYS** (work-notes/41; spec §9.6): `mwydyn-guest` is the
+author-facing crate — one dependency, one trait, one entry line.
+`Actor::receive(letter BY VALUE, &Cx) -> Vec<Effect>` (mirrors the
+native contract — compose-parity of the API itself), `Durable`
+(snapshot/restore), THE THREE WORDS: `entry!` / `stateful_entry!` /
+`durable_entry!` (durable implies the stateful bit AND
+compile-REQUIRES `Durable` — the vacuous-snapshot class dies at
+build time). Typed `Cx` (blob get/put/len/caps — refusals BY NAME
+as `Refusal`), `Effect::post/reply/reply_via`, `ValueExt`/`LetterExt`
+payload getters, `fail!` = the documented strike path (panic =
+strike, all of it in the crate doc — DOCS-AS-PRODUCT: the crate doc
+IS the guide). **STATEFULNESS IS GUEST-DECLARED (§9.2,
+owner-ratified in session)**: every entry macro emits
+`mwydyn_decl() -> u32` (bit 0 = stateful; stateless = explicit
+zero; ABSENT = Stateless by omission — hand-rolled guests, WAT
+fixtures); the container probes it ONCE at composition (one
+throwaway instantiation — the probe store needs its own
+`set_epoch_deadline`, the default is EXPIRED: found the hard way),
+`from_compiled_stateful` is REMOVED — **no embedder override
+exists** (forcing a stateful guest stateless silently breaks
+exactly-once; refused by removing the path). The `replyTo`
+payload-field convention is RATIFIED (§9.5 DECIDED — owner, after
+seeing it in force). THE PANIC WALL: generated exports catch + abort
+INSIDE the extern boundary — host targets cannot unwind through
+`extern "C"` (STATUS_STACK_BUFFER_OVERRUN, found the hard way); wasm
+traps natively; loud either way. Examples: counter → `durable_entry!`
+(round-39 durable proof unchanged), store → `entry!` (receipt shape
+preserved, capRows always present), NEW `guest-dedup` = THE DUAL
+PROOF alive under guest-declaration: ONE source, TWO artifacts
+(`--features stateless-build`) — stateful rolls the strike-dirtied
+seen-mark back ("b" still fresh), stateless keeps it; plus WAT
+probe fixtures (absent / explicit-zero / bit-0). `build-guest.sh`
+now builds ALL five artifacts (it had rotted to minimal-only).
+DOC MAINTENANCE: spec §9 consolidates the WASM guest contract
+(rounds 33+37+39+40+41) — the WIT draft is annotated SUPERSEDED in
+the §7 queue, `world-v0.wit` is RETIRED (git history keeps it),
+README/plan/spec swept of dead-interface references. All suites
+green (31 suites, 71 tests), clippy clean workspace-wide.
+
 **ROUND 40: THE AMBIENT HOST-FACE IMPORT SURFACE** (work-notes/40):
 ONE import — `mwydyn.ambient(in_ptr, in_len, out_ptr, out_cap) ->
 written` — canonical CBOR envelope in (`{"verb": ..., <fields>}`),
@@ -240,6 +282,7 @@ composition declarative at open, replay of DELIVERED letters
 (1..=cursor) with effects discarded + clock pinned to journaled
 commit times + Mint facts rebuilt into rows — idempotent via
 base_rows reset; durable-context test proves work→die→reopen→keep
-working with exactly-once delivery. **Next:** M3 blob persistence +
-GC; the executor (round 21); WASM guests (world v0.3 binding);
-§7.6 snapshots for state-as-of-position.
+working with exactly-once delivery. **Next:** ambient conformance vectors
+(ambient-v0); mwydyn-stdlib (the merge actor); epoch/fuel budgets
+armed per exchange (the executor round); the JS guest SDK on
+QuickJS-ng (the next language over the same three words).

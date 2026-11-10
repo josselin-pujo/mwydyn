@@ -1,0 +1,18 @@
+[package]
+name = "mwydyn-guest-dedup"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The STATEFUL example guest (round 41): an exactly-once dedup
+# window on stateful_entry!. The `stateless-build` feature swaps the
+# declaration to entry! — same source, the round-37 dual proof.
+# Build via scripts/build-guest.sh (wasm32-unknown-unknown).
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+stateless-build = []
+
+[dependencies]
+mwydyn-guest = { path = "../mwydyn-guest" }

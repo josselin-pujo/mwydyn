@@ -254,12 +254,14 @@ mutation management and ordering; blobs have neither — immutable,
 content-addressed, idempotent. Mailbox round-trips on them are
 ceremony without payoff.
 
-- The store is an **ambient host service behind the frozen WIT world**:
-  `blob.put(bytes, mediaType, ttl?) → ref`, `blob.get(ref) → bytes |
-  loud-missing`, `blob.len(ref)`, `blob.get_range(ref, offset, len)`
-  — synchronous host functions, hardcoded Rust, collocated in every
-  runtime. (Range/len exist so consumers stream without materializing
-  — docgen's PDFs.) **Round 16: put is eager-during-receive, not an
+- The store is an **ambient host service**: `blob.put(bytes,
+  mediaType, ttl?) → ref`, `blob.get(ref) → bytes | loud-missing`,
+  `blob.len(ref)`, `blob.get_range(ref, offset, len)` — synchronous
+  host functions, hardcoded Rust, collocated in every runtime.
+  Native actors hold the face directly; WASM guests reach the same
+  verbs, same cap checks, through the ambient import (§9.4).
+  (Range/len exist so consumers stream without materializing —
+  docgen's PDFs.) **Round 16: put is eager-during-receive, not an
   effect (§3.5) — allocation is not an effect; the ref is in the
   actor's hand the moment the call returns.**
 - **[amended round 28] Verification is PROVIDER POLICY.** The
@@ -319,21 +321,23 @@ ceremony without payoff.
   Timers: message-shaped (a timer event IS a message). Telemetry:
   lossy by design, exempt from replay semantics. Query-shaped blob
   surface (search, listing), if ever needed, is a native actor —
-  never WIT growth.
+  never ambient-surface growth.
 
 ## 5. Type layers [DECIDED]
 
-- **Layer 1 — the frozen WIT world**: protocol verbs only (post,
-  yield, subscribe?, snapshot, telemetry, capability ops). Frozen by
-  rule: the first host-need evolution that adds a WIT function broke
-  the freeze.
+- **Layer 1 — the frozen guest ABI (§9)**: the barrier's effect
+  verbs (post; mint/emit when their effects land) plus the ambient
+  import's read verbs (§9.4). Frozen by rule: the first host-need
+  evolution that adds an import or an ABI-level function breaks the
+  freeze. Surface growth happens as DATA — ambient verbs (round 40)
+  and barrier effect verbs evolve without touching the ABI.
 - **Layer 2 — CBOR message schemas**: application contracts,
   versioned, registry-disciplined. **New capability = new message
-  type + capability check, never a WIT change.** A1's evolution law
+  type + capability check, never an ABI change.** A1's evolution law
   carries over [A1:04 §7]: within a schema version, new fields are
   optional and consumers are tolerant readers; breaking changes bump
   the schema version.
-- OPEN: exact verb set (§7.8); registry mechanics (§7.9).
+- OPEN: registry mechanics beyond round 10 (§7.9).
 
 ## 6. Execution [DECIDED choices / OPEN mechanisms]
 
@@ -488,21 +492,24 @@ ceremony without payoff.
 4. ~~Addressing & routing~~ — RESOLVED → §3.4 (names + ids +
    bindings; naming opt-in; dispatch queues as bindings). The
    no-well-known-registry note stands: ambient primitives live in
-   the WIT world, mediated services ride capabilities + log.
+   the guest ABI (§9), mediated services ride capabilities + log.
 5. **Telemetry contract** — correlation propagation, span shape, drop
    accounting.
 6. **Snapshot/replay contract** — checkpoint format, watermark
-   stamps, GC interplay with time travel.
+   stamps, GC interplay with time travel. (Guest boot-snapshot ABI
+   landed round 39 → §9.3; the checkpoint-format fork remains.)
 7. **Time-travel layer** — the optional clock/log spine for actors
    that opt in (snapshot-enabled ⇔ spine-riding).
-8. ~~WIT verb set~~ — DRAFTED → [world-v0.wit](world-v0.wit)
-   (rounds 06–07): **effect-list shape ratified** — imports are pure
-   reads only (blob reads + `caps.list`); exports are `receive`
-   (pure transition → effects) and `boot/init`; one well-known name
-   (ticker). Rejected from v0, with reasons in work-note 06: `yield`,
-   `subscribe`, a snapshot verb, a timer verb — and, round 07, all
-   imperative write imports. OPEN within the draft: envelope field
-   set convergence (§2); `field-value` variant contents.
+8. ~~WIT verb set~~ — DRAFTED rounds 06–07 as `docs/world-v0.wit`
+   (file retired round 41; git history keeps it), **SUPERSEDED
+   round 33 → §9** (WIT is dead: canonical CBOR is the WASM ABI,
+   zero-import guests). The ratified SHAPE survives the interface
+   layer's death: effects returned never called, imports
+   read-only-by-grant, one well-known name (ticker). Rejected from
+   v0, with reasons in work-note 06: `yield`, `subscribe`, a
+   snapshot verb, a timer verb — and, round 07, all imperative
+   write imports. Residues still live: envelope field set
+   convergence (§2); `field-value` variant contents.
 9. **Schema registry** — [DECIDED, round 10]: ids
    `<namespace>.<name>@<major>`; the envelope `kind` carries it;
    namespaces claimed per context at composition, conflicting
@@ -602,3 +609,89 @@ with badly defined semantics.)
   the face's `Send + Sync` bound and the §8.4 admission list are
   the entire integration surface; their dependency waves (tokio,
   TLS, client SDKs) never touch the core's graph.
+
+## 9. The WASM guest contract [DECIDED, rounds 33+37+39+40+41]
+
+Consolidated here from the rounds that built it; the barrier speaks
+the journal's vocabulary (one canon, both realms) and adds nothing
+the data model does not already define.
+
+### 9.1 The barrier
+
+Guests compile to plain `wasm32-unknown-unknown`. Exports:
+`alloc(len)→ptr`, `dealloc(ptr,len)`, `process(req_ptr,req_len)→
+resp_ptr`. The host writes the request at guest-provided scratch;
+the response block is `[u32 le len][canonical CBOR bytes]`.
+
+- Request: `{"from": <address>, "letter": <letter>, "v": 1}` —
+  canonical CBOR, version-gated before interpretation.
+- Response: an array of single-entry effect maps; `post` is the
+  only verb today (`{"post": {"to", "letter"}}`); unknown verbs
+  refused by name.
+- Every failure mode — trap, garbage bytes, bad shape — is a crash,
+  and crashes are supervision's problem (panic = strike).
+- The payload wall applies at the barrier identically to native
+  admission (compose-parity at the gate).
+
+### 9.2 Declared statefulness — the guest declares [round 37, amended round 41]
+
+The statefulness declaration belongs to the GUEST, not the
+embedder, mirroring native `fork_carries_state` (compose-parity of
+the declaration itself):
+
+- A guest MAY export `mwydyn_decl() -> u32` — bit flags; bit 0 =
+  STATEFUL. ABSENCE = Stateless by omission (test fixtures,
+  hand-rolled guests).
+- The runtime reads it as the lifecycle's source of truth:
+  Stateful = pre-receive linear-memory image rollback (exactly-once
+  internal state; mutable globals are NOT covered — stateful state
+  lives in linear memory); Stateless = "just reused", no guarantee.
+- **No embedder override exists.** Composing a stateful guest as
+  stateless would silently break the author's exactly-once
+  expectation; the mismatch is refused by removing the override
+  path entirely (round 41).
+
+### 9.3 Durable snapshots (§7.6 boot ABI) [round 39]
+
+A guest MAY export `restore(ptr,len)` (apply a boot snapshot;
+loud refusal if the boot carries state and the export is absent)
+and `snapshot()→[u32 len][state bytes]` (the runtime stores it via
+the blob face and lands a covers-stamped snapshot letter; the
+state format is the guest's own). Export presence is the capability
+probe. Snapshot semantics require statefulness — snapshotting a
+torn state is a category error; SDK-level entry surfaces enforce
+the implication (§9.6).
+
+### 9.4 The ambient import [round 40]
+
+ONE optional import, `mwydyn.ambient(in_ptr, in_len, out_ptr,
+out_cap) -> written`: canonical CBOR `{"verb": ..., <fields>}` in,
+`{"ok"} | {"err": "<code>"}` out, `-1` = response did not fit.
+Verbs mirror the native host face with the same cap checks:
+`blob.get`/`blob.len` (blob.read), `blob.put` (blob.write), `caps`
+(free). No clock verb — the ticker is the only wall-clock reader
+(§6). Powers are granted per-actor (capability rows), never
+ambient; refusals are observed by name.
+
+### 9.5 Reply routing [DECIDED, round 41]
+
+The envelope's `from` IS the return address (no reply-to field —
+owner law). Payload-level routing to a THIRD place (e.g. the
+embedding's external outbox) is a convention, not a model field.
+RATIFIED: the SDK blesses `replyTo` — an Address-typed payload map
+field — with helpers reading it by convention
+(`Effect::reply_via`). Neutrality (every embedding its own
+convention) and configurable field names are the rejected
+alternatives on record.
+
+### 9.6 Guest SDKs
+
+SDKs wrap §9.1–§9.5 for plugin authors who know none of it; they
+add surface for humans, never semantics for the runtime. The Rust
+SDK (round 41) is the reference shape: an `Actor` trait mirroring
+the native `receive → effects` contract, a `Durable` super-trait
+compile-required for snapshot exports (the vacuous-snapshot bug
+class dies at build time), and entry points making the declaration
+choice explicit — stateless / stateful / durable. Additional
+language SDKs (JS on QuickJS-ng) must expose the same three words
+over the same ABI.

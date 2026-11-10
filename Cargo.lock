@@ -722,7 +722,14 @@ dependencies = [
 name = "mwydyn-guest-counter"
 version = "0.1.0"
 dependencies = [
- "mwydyn-data",
+ "mwydyn-guest",
+]
+
+[[package]]
+name = "mwydyn-guest-dedup"
+version = "0.1.0"
+dependencies = [
+ "mwydyn-guest",
 ]
 
 [[package]]
@@ -736,7 +743,6 @@ dependencies = [
 name = "mwydyn-guest-store"
 version = "0.1.0"
 dependencies = [
- "mwydyn-data",
  "mwydyn-guest",
 ]
 

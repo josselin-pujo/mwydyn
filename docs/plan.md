@@ -10,9 +10,9 @@
   critical sections); what matters is that they compose IDENTICALLY
   to WASM actors — same `receive → effects` trait, same admission,
   same semantics. M0 native / M1 WASM split exists to keep that
-  interface honest (and non-wasmtime-specific). The frozen world
-  RESISTS extension, which is what makes additional guest languages
-  cheap later.
+  interface honest (and non-wasmtime-specific). The frozen guest
+  ABI (spec §9) RESISTS extension, which is what makes additional
+  guest languages cheap later.
 - **Faces, not implementations (M2/M3)**: the journal and blob
   concepts are universal; implementations are not. Single-node
   SQLite is v0; a distributed journal (raft or lolPaxos) and tiered
@@ -33,8 +33,10 @@
   engine, structural admission, supervision policies (`fail-fast`,
   `restart`), the ticker, the blob store, the task pattern. The
   runtime library — usable without any WASM.
-- `crates/mwydyn-wasmtime` — guest hosting of world-v0 (bindings,
-  decode at the barrier, epoch/fuel budgets). Feature-gated.
+- `crates/mwydyn-wasm` — guest hosting over wasmtime: the CBOR
+  barrier container (lazy persistent instances, declared
+  statefulness, §7.6 snapshot ABI), the ambient import dispatch,
+  epoch budgets. Peer to the core, never in it.
 - `crates/mwydyn-vectors` — the vector runner (JSON vectors, CBOR as
   hex + diagnostic notation); consumed by tests AND external
   implementations.
@@ -74,6 +76,14 @@
   39); the ambient host-face import surface (round 40, `mwydyn.
   ambient` + the mwydyn-guest SDK). Remaining: ambient conformance
   vectors (ambient-v0); mwydyn-stdlib (the merge actor).
+- **Guest SDK — Rust (round 41, spec §9.6):** author-facing
+  `mwydyn-guest` (Actor/Durable traits, `entry!`/`stateful_entry!`/
+  `durable_entry!`, typed `Cx`/`Effect`, one-dependency prelude);
+  statefulness becomes GUEST-DECLARED (`mwydyn_decl` export, spec
+  §9.2 — `from_compiled_stateful` removed); counter/store migrate
+  onto the SDK as living examples, minimal stays the byzantine
+  fixture; new stateful-ephemeral example; docs-as-product (the
+  crate doc is the guide).
 - **M4 — the A1 corpus, conformance-green.** `cbor-v1.json` et al.
   pass in `mwydyn-vectors`; every DECIDED spec section has vectors;
   spec v0 declared complete.
