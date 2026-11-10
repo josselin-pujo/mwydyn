@@ -6,11 +6,15 @@
 > arithmetic, JSON escaping, Math.pow, RegExp, frozen Date,
 > exception recovery — on the Rust-owned heap. Host engine tests
 > green at native speed; workspace 35 suites, clippy clean.
-> Remaining: the BUILD TOOL (script-slot probe + data-segment
-> append), TS package, example guests, container proofs. The
-> WRAPPER ITSELF now compiles both targets (guest.rs + convert.rs +
-> prelude.js: three words with probe-time mwydyn_decl boot, ambient
-> bridging, telemetry emit from day one — Effect.log/metric, §3.6). Direction owner-ratified in session:
+> COMPLETE (2026-11-10): engine, wrapper, prelude, `mwydyn-js`
+> build tool, @mwydyn/guest TS types, the echo example, and the
+> CONTAINER PROOF — a JS script through the real container, echo to
+> the external outbox + the §3.6 telemetry log in the drain, the
+> host never learning JS exists (§1's law, proven). Telemetry rode
+> the prelude from day one (Effect.log/metric).
+> KNOWN ISSUE, pinned: the wrapper crashes under Rust opt-level >= 1
+> (C stays O2) — the workspace profile pins the crate to 0; the
+> hunt is the top follow-up (optimizer-sensitive FFI UB suspected). Direction owner-ratified in session:
 > JS guest next, TYPESCRIPT FIRST-CLASS — the types are a
 > conformance aid, not documentation. Forks below carry DEFAULTS IN
 > FORCE, none individually ratified (owner unanswered in session —
@@ -167,6 +171,30 @@ crate (pinned release, checksum recorded) — the build never fetches.
   out after the trap (a trapped instance takes no further calls).
 - Toolchain: LLVM/clang 23 alone suffices for BOTH targets (the
   Windows Kits headers feed the MSVC-flavored host compile).
+
+## 9. The lessons part 2 taught
+
+- **THE NUL WALL, strikes 2-4**: every C-string boundary needs a
+  terminator — property KEYS both ways (a Rust &str key builds
+  garbage names; an atom's String read back leaks adjacent heap;
+  gets succeed only when heap slack holds a zero byte —
+  intermittent by allocation luck). The atom-direct conversion
+  (JS_GetProperty with the enumerated atom; length-delimited key
+  bytes) closes the class: no string re-interning on the hot path.
+- **Call your accessors**: `mwd.__actor` fetched the FUNCTION and
+  `receive` was looked up on it — decl worked because it CALLS
+  `__mode()`, receive failed because it didn't call `__actor()`.
+  Same bug in the durable handlers.
+- **JS_GPN_STRING_MASK is (1<<0)**, not 0 — flags 0 asks for
+  nothing and the enumeration silently returns an empty table.
+- **The panic stash must be allocation-free** (a heap bug may be
+  what panicked; formatting allocates → nested abort loses the
+  message) and readable WITHOUT calling the trapped instance — the
+  buffer exports as a wasm global: [u32 le LEN][message]. Marker
+  scans fail: the marker consts live in rodata too.
+- **The release-only crash**: opt-level >= 1 breaks the wrapper (C
+  at O2 both ways, debug fine). Pinned to 0 in the workspace
+  profile; root-causing it is the follow-up.
 
 ## Provenance
 

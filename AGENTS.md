@@ -329,11 +329,16 @@ table with the bridge, join at the sink); envelope trace tokens
 DORMANT until cross-process transport exists. telemetry-v0
 corpus (19 cases) + generator + harness; OTel mapping = an
 out-of-core layer, out of scope permanently.
-**Next:** ROUND 43 IN FLIGHT — the JS/TS guest SDK on QuickJS-ng
-(work-notes/43; ENGINE MILESTONE LANDED: freestanding quickjs-ng
-v0.18.0 evaluates under wasmtime on the Rust heap — see the note's
-lessons: the NUL wall, C11 tag scope, the realloc header poison);
-remaining: wrapper/conversion/prelude, build tool, TS package;
-after it: the PyO3 host-side embedding
+**ROUND 43 COMPLETE** (work-notes/43): the JS/TS guest SDK —
+engine (quickjs-ng v0.18.0 freestanding), wrapper+conversion+prelude
+(three words with PROBE-TIME mwydyn_decl boot — the script's
+registration IS the §9.2 declaration; Effect.log/metric from day
+one), the `mwydyn-js` build tool (script-slot probe + data-segment
+append), @mwydyn/guest types-only TS package, and the container
+proof (echo + the §3.6 telemetry log in the drain). KNOWN ISSUE:
+wrapper crashes at Rust opt-level >= 1 (pinned to 0; FFI UB hunt
+open — the note's lessons: NUL wall ×4, atom-direct conversion,
+allocation-free panic stash via exported global).
+**Next:** the PyO3 host-side embedding
 (owner-ratified role; stateless-only v0 default); mwydyn-stdlib
 (the merge actor); epoch/fuel budgets armed per exchange.
