@@ -149,7 +149,7 @@ fn wasm_ping_pong_pipeline_throughput() {
         vec![],
     )
     .unwrap();
-    ctx.post(&ping_addr, kick, vec![]);
+    ctx.post(&ping_addr, kick, vec![], None);
 
     // Run the pump: the letters bounce ping → pong → ping → pong
     // until the counter reaches 0. Each bounce is one WASM call

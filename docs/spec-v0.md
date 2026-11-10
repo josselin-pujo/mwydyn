@@ -69,7 +69,7 @@
 - An actor has an **inbox**, an **outbox**, and a **telemetry
   outbox**. Telemetry is best-effort, lossy by design, never
   backpressures business messages, and lives **outside**
-  snapshot/rollback semantics.
+  snapshot/rollback semantics. The contract: §3.6.
 - **Durability is runtime-owned and tiered**: inboxes and outboxes are
   always durable objects; the backing tier varies per actor (RAM for
   CLI/task actors → journaled disk for hosted). Same contract,
@@ -191,6 +191,19 @@
   named, long-lived actor.
 - Location transparency: addresses are data; resolution is a runtime
   concern; in-proc vs network never changes message bytes.
+- **The external boundary is a handle, and it closes causal loops
+  [round 44]**: `drain_external()` yields stamped envelopes (seq in
+  hand); injection (`Context::post`) RETURNS the seq and accepts an
+  optional parent, stamped into the envelope's `ack` under the
+  round-26/29 law (host-decided causality; core-validated against
+  known seqs or refused `invalid`). External id ↔ seq mapping lives
+  in the embedder's store — the seq return is the durable channel;
+  telemetry never carries it (§3.6). Request/response across the
+  boundary thus traces end to end: drain (seq out) → external work
+  → inject (parent in) — no protocol the external system must speak.
+  The same two handles ARE the cross-context bridge pattern (§3.6):
+  drain seq out, injection seq in, edge table with the bridge, join
+  at the sink.
 
 ### 3.5 Effects and transactions [DECIDED, rounds 07+16]
 
@@ -236,8 +249,8 @@ owner caught it by asking how any actor ever gets a ref to post.)
   `invalid`/`unauthorized` = permanent — the attempt burns, N strikes
   → the dead-letter path (§3.1).
 - **Telemetry is outside the transaction**: `emit` effects apply
-  best-effort regardless of commit or rollback — lossy by design
-  (§3.2).
+  best-effort regardless of commit or rollback — lossy by design,
+  and structurally lossy at that (§3.6).
 - **Reads are repeatable by contract**: imports are limited to
   content-addressed blob reads and `caps.list` — the answer is a
   function of the ref; a swept ref is a loud error, never changed
@@ -246,6 +259,76 @@ owner caught it by asking how any actor ever gets a ref to post.)
   imports are pure reads; checkpoints (§7.6) become trivially atomic;
   replay-testing is vector-shaped: `(letter, seeded memory, blob
   fixtures) → effects`.
+
+### 3.6 The telemetry outbox [DECIDED, round 44]
+
+- **Three producers, one outbox.** Actors declare `log` and `metric`
+  records (emit effects); the runtime declares `lifecycle` (§3.2
+  facts), `refusal` (admission + ambient refusals), `drop` (loss
+  accounting), and `exchange` (the span skeleton, below). **Spans
+  are nobody's declaration** — derived at the sink from
+  core-attached lineage. Actor spans are unimplementable by law,
+  not merely undesired: clock obliviousness (§6) forbids measuring
+  durations, and atomic transitions give mid-flight markers
+  identical stamps (round 44, owner-ratified).
+- **The record is canonical CBOR with CLOSED kinds** (`log | metric |
+  exchange | lifecycle | refusal | drop`); unknown kinds refused by
+  name — barrier-verb discipline, because telemetry is
+  infrastructure data (contrast round 10's opaque letter `kind`,
+  which is application data). Guests supply kind + payload ONLY;
+  `ts`, `actor`, `seq` are RUNTIME-MINTED on apply — no forged
+  attribution or timestamps, even accidentally. `Level` stays
+  5-valued; metrics are points-not-aggregates, temporality always
+  delta.
+- **Semantics**: outside the transaction, literally — a failed
+  journal commit does not retract emits; no double-counting by
+  construction (hydration discards effects; crashes eat theirs
+  pre-apply — one real exchange emits at most once). Emission is
+  UNGATED: observation is not an effect on the world (posts are
+  ungated today; the default-deny fork may revisit WITH routing,
+  never telemetry-first), and floods become drop records — never
+  strikes.
+- **The outbox is one bounded ring per context** (drop-oldest,
+  capacity knob): "never backpressures" is a structural guarantee,
+  not a convention. `drain_telemetry()` is the embedder's handle
+  (the `drain_external()` pattern); a drain that lost records leads
+  with a synthetic `drop {dropped, by_kind}` record — the pipeline
+  carries its own loss ledger. No push face: apply stays
+  allocation-only.
+- **Lineage attachment (spans)**: one `exchange` record per delivery
+  attempt, always emitted (busy included — late-because-busy is
+  trace-relevant), default-on behind a builder flag: `{seq, ack?,
+  from, actor, ts_in, ts_out, outcome: committed | busy | struck}`.
+  `seq` = span id; `ack` = parent span id (already the
+  checksum-bound envelope field, round 26/29 — the mailbox hands it
+  to the pump; the core adds a field read, not a law); `ack: None` =
+  root (embedding/pump and timer posts; trace id ≡ root seq of the
+  ack chain). Actor records join by `seq` → span events; orphan
+  records (their exchange record dropped) are legal lossy behavior.
+  Sink-side derivation is a pure function of one drain stream; an
+  unresolvable `ack` (a foreign context's seq) links-or-roots.
+  **Actors never see lineage; sinks never touch the journal; the
+  core attaches both halves.** The journal remains the durable
+  record of causality; telemetry is the lossy real-time projection
+  WITH timing — dispatch wall time exists nowhere else.
+- **Cross-context correlation [round 44, owner-ratified]**: the
+  general case is unsolvable by the runtime — carriers must
+  cooperate (OTel's own position). Foreign systems correlate by
+  PAYLOAD convention, echoing our outbound `seq` (§9.5 precedent).
+  mwydyn↔mwydyn closes at the bridge: the bridging embedding is the
+  only entity holding both namespaces, and it holds them by these
+  very handles (drained seq out, injected seq back); the edge table
+  lives with the bridge, the join at the sink — zero core surface.
+  Envelope trace tokens stay DORMANT until cross-process mwydyn
+  transport exists.
+- **The barrier carries `emit`** (round 44): additive response verb,
+  NO ABI bump (an older host refuses it by name through the
+  documented `UnsupportedVerb` slot); the record shape lives in
+  mwydyn-data beside the barrier contract; conformance vectors
+  `telemetry-v0`.
+- **The OTel mapping is a LAYER, out of core** (tight core, round
+  18): the types merely project cleanly — severity numbers, delta
+  temporality, seq/ack span identity, context name → resource.
 
 ## 4. Blobs — an ambient host service [DECIDED, round 02]
 
@@ -326,7 +409,8 @@ ceremony without payoff.
 ## 5. Type layers [DECIDED]
 
 - **Layer 1 — the frozen guest ABI (§9)**: the barrier's effect
-  verbs (post; mint/emit when their effects land) plus the ambient
+  verbs (post + emit [round 44]; mint when its effect lands) plus
+  the ambient
   import's read verbs (§9.4). Frozen by rule: the first host-need
   evolution that adds an import or an ABI-level function breaks the
   freeze. Surface growth happens as DATA — ambient verbs (round 40)
@@ -493,8 +577,18 @@ ceremony without payoff.
    bindings; naming opt-in; dispatch queues as bindings). The
    no-well-known-registry note stands: ambient primitives live in
    the guest ABI (§9), mediated services ride capabilities + log.
-5. **Telemetry contract** — correlation propagation, span shape, drop
-   accounting.
+5. ~~Telemetry contract~~ — RESOLVED → §3.6 (round 44: closed-kind
+   records, the shared ring + drop ledger, core-attached lineage
+   with the `exchange` record, the injection handle in §3.4).
+   Residue: **cross-context correlation** — resolved in the same
+   round (work-note 44 §6): foreign systems correlate by PAYLOAD
+   convention (echoing our outbound seq — §9.5 precedent; the
+   runtime cannot know edges only the carrier knows); mwydyn↔mwydyn
+   traces close at the BRIDGE — the bridging embedding holds both
+   namespaces by the ratified handles (drained seq out, injected
+   seq in), keeps the edge table, the sink joins — zero core
+   surface; envelope trace tokens stay DORMANT, reopening only when
+   cross-process mwydyn transport exists (then: a version bump).
 6. **Snapshot/replay contract** — checkpoint format, watermark
    stamps, GC interplay with time travel. (Guest boot-snapshot ABI
    landed round 39 → §9.3; the checkpoint-format fork remains.)
@@ -625,9 +719,11 @@ the response block is `[u32 le len][canonical CBOR bytes]`.
 
 - Request: `{"from": <address>, "letter": <letter>, "v": 1}` —
   canonical CBOR, version-gated before interpretation.
-- Response: an array of single-entry effect maps; `post` is the
-  only verb today (`{"post": {"to", "letter"}}`); unknown verbs
-  refused by name.
+- Response: an array of single-entry effect maps — `post` and
+  `emit` (round 44): `{"post": {"to", "letter"}}` and
+  `{"emit": {telemetry record}}` (kind + payload only; `ts`/
+  `actor`/`seq` are runtime-minted, never guest-supplied — §3.6).
+  Unknown verbs refused by name.
 - Every failure mode — trap, garbage bytes, bad shape — is a crash,
   and crashes are supervision's problem (panic = strike).
 - The payload wall applies at the barrier identically to native

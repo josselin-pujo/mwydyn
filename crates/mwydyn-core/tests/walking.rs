@@ -7,6 +7,7 @@ use mwydyn_core::{
 };
 #[cfg(feature = "sqlite")]
 use mwydyn_core::SQLiteJournal;
+use mwydyn_data::telemetry::{LifecycleEvent, Outcome, TelPayload};
 use mwydyn_data::{Address, DecodeOptions, Letter, Value};
 #[cfg(feature = "sqlite")]
 use mwydyn_core::SQLiteBlobStore;
@@ -43,15 +44,10 @@ impl Actor for Collector {
         Box::new(self.clone())
     }
     fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, letter: &Letter) -> Vec<Effect> {
-        vec![Effect::Emit {
-            level: Level::Info,
-            message: format!(
-                "{}:{}:{}",
-                self.tag,
-                letter.kind,
-                payload_text(&letter.payload)
-            ),
-        }]
+        vec![Effect::log(
+            Level::Info,
+            format!("{}:{}:{}", self.tag, letter.kind, payload_text(&letter.payload)),
+        )]
     }
 }
 
@@ -88,12 +84,12 @@ fn admission_verdicts() {
     let l = Letter::new("test.x@1", nul(), None, None, vec![]).unwrap();
 
     assert_eq!(
-        ctx.post(&addr("c1", "nope"), l.clone(), vec![]),
+        ctx.post(&addr("c1", "nope"), l.clone(), vec![], None),
         Verdict::Refused(RefuseReason::UnknownTarget)
     );
     // Cross-context does not resolve from inside one (§3.5: sagas).
     assert_eq!(
-        ctx.post(&addr("other", "sink"), l.clone(), vec![]),
+        ctx.post(&addr("other", "sink"), l.clone(), vec![], None),
         Verdict::Refused(RefuseReason::UnknownTarget)
     );
     // The core trusts nothing: a letter with its fields set directly
@@ -101,7 +97,7 @@ fn admission_verdicts() {
     let mut raw = l.clone();
     raw.kind = "nope".into();
     assert_eq!(
-        ctx.post(&addr("c1", "sink"), raw, vec![]),
+        ctx.post(&addr("c1", "sink"), raw, vec![], None),
         Verdict::Refused(RefuseReason::Invalid)
     );
     // THE PAYLOAD WALL (round 33): non-canonical payload bytes are
@@ -110,7 +106,7 @@ fn admission_verdicts() {
     let mut garbage = l.clone();
     garbage.payload = vec![0xFF, 0x00];
     assert_eq!(
-        ctx.post(&addr("c1", "sink"), garbage, vec![]),
+        ctx.post(&addr("c1", "sink"), garbage, vec![], None),
         Verdict::Refused(RefuseReason::Invalid)
     );
 
@@ -122,12 +118,12 @@ fn admission_verdicts() {
         .bound(1),
     )
     .unwrap();
+    assert!(matches!(
+        ctx.post(&addr("c1", "tiny"), l.clone(), vec![], None),
+        Verdict::Accepted { .. }
+    ));
     assert_eq!(
-        ctx.post(&addr("c1", "tiny"), l.clone(), vec![]),
-        Verdict::Accepted
-    );
-    assert_eq!(
-        ctx.post(&addr("c1", "tiny"), l, vec![]),
+        ctx.post(&addr("c1", "tiny"), l, vec![], None),
         Verdict::Refused(RefuseReason::Busy)
     );
 }
@@ -140,7 +136,7 @@ fn replies_to_external_land_in_the_drainable_outbox() {
     // Echo replies to `from` — external now HAS an inbox: the
     // embedding's drainable outbox (§3.4's handle mechanism).
     let l = Letter::new("test.hi@1", txt("yo"), None, Some("c1".into()), vec![]).unwrap();
-    ctx.post(&addr("c1", "echo"), l, vec![]);
+    ctx.post(&addr("c1", "echo"), l, vec![], None);
     ctx.run_until_idle(50);
     let replies = ctx.drain_external();
     assert_eq!(replies.len(), 1);
@@ -176,10 +172,7 @@ impl Actor for Forward {
                 .unwrap(),
             }]
         } else {
-            vec![Effect::Emit {
-                level: Level::Info,
-                message: format!("forward got {}", letter.kind),
-            }]
+            vec![Effect::log(Level::Info, format!("forward got {}", letter.kind))]
         }
     }
 }
@@ -198,15 +191,15 @@ fn multi_hop_reply_rides_from() {
     ))
     .unwrap();
     let l = Letter::new("test.go@1", txt("go"), None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "fwd"), l, vec![]);
+    ctx.post(&addr("c1", "fwd"), l, vec![], None);
     ctx.run_until_idle(50);
     // fwd → echo (from = fwd's instance) → echo replies to from →
     // fwd sees the reply. The reply-to-from pattern needs no
     // reply-to field (round 09).
-    assert!(ctx
-        .telemetry()
-        .iter()
-        .any(|(_, m)| m.contains("forward got test.echo.reply@1")));
+    assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Log { message, .. }
+            if message.contains("forward got test.echo.reply@1"))
+    }));
 }
 
 #[derive(Clone)]
@@ -258,24 +251,28 @@ fn effect_busy_requeues_without_burning_attempts() {
     // effect cannot fit, so the WHOLE list is refused busy.
     for _ in 0..2 {
         let l = Letter::new("test.pre@1", txt("p"), None, None, vec![]).unwrap();
-        ctx.post(&addr("c1", "sink"), l, vec![]);
+        ctx.post(&addr("c1", "sink"), l, vec![], None);
     }
     let second = Letter::new("test.go@1", txt("g"), None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "dbl"), second, vec![]);
+    ctx.post(&addr("c1", "dbl"), second, vec![], None);
     ctx.run_until_idle(50);
     // The busy refusal requeued the letter, no attempt burned, and
     // everything eventually landed: 4 sink emissions (2 pre + 2).
     let emissions = ctx
         .telemetry()
         .iter()
-        .filter(|(_, m)| m.starts_with("s:test.d@1") || m.starts_with("s:test.pre@1"))
+        .filter(|r| {
+            matches!(&r.payload, TelPayload::Log { message, .. }
+                if message.starts_with("s:test.d@1") || message.starts_with("s:test.pre@1"))
+        })
         .count();
     assert_eq!(emissions, 4, "all four letters landed: {:?}", ctx.telemetry());
     assert!(ctx.dead_letters().is_empty());
-    assert!(ctx
-        .telemetry()
-        .iter()
-        .any(|(lvl, m)| *lvl == Level::Debug && m.contains("state rolled back")));
+    // ROUND 44: the busy fact is the exchange record (§3.6) — no
+    // stringly log line anymore.
+    assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Exchange { outcome: Outcome::Busy, .. })
+    }));
 }
 
 #[derive(Clone)]
@@ -289,10 +286,10 @@ impl Actor for Panicky {
         if letter.payload == txt("boom") {
             panic!("synthetic boom");
         }
-        vec![Effect::Emit {
-            level: Level::Info,
-            message: format!("ok:{}", payload_text(&letter.payload)),
-        }]
+        vec![Effect::log(
+            Level::Info,
+            format!("ok:{}", payload_text(&letter.payload)),
+        )]
     }
 }
 
@@ -319,15 +316,22 @@ fn restart_supervision_reinstates_and_dead_letters_poison() {
             vec![],
         )
         .unwrap();
-        ctx.post(&addr("c1", "pan"), l, vec![]);
+        ctx.post(&addr("c1", "pan"), l, vec![], None);
     }
     ctx.run_until_idle(50);
     // Three strikes on the poison letter → dead-letter; the fresh
     // instance processes `fine`.
     assert_eq!(ctx.dead_letters().len(), 1);
     assert_eq!(ctx.dead_letters()[0].letter.payload, txt("boom"));
-    assert!(ctx.telemetry().iter().any(|(_, m)| m == "ok:fine"));
-    assert!(ctx.telemetry().iter().any(|(_, m)| m.contains("restarted fresh")));
+    assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Log { message, .. } if message == "ok:fine")
+    }));
+    assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Lifecycle {
+            event: LifecycleEvent::Crashed,
+            detail: Some(d),
+        } if d.contains("restarted fresh"))
+    }));
 }
 
 #[test]
@@ -343,17 +347,21 @@ fn fail_fast_is_terminal_and_drains_pending() {
             vec![],
         )
         .unwrap();
-        ctx.post(&addr("c1", "pan"), l, vec![]);
+        ctx.post(&addr("c1", "pan"), l, vec![], None);
     }
     ctx.run_until_idle(50);
     // The crash is terminal: `fine` never ran — it drained to dead
     // letters with the actor's mailbox.
     assert_eq!(ctx.dead_letters().len(), 2);
-    assert!(!ctx.telemetry().iter().any(|(_, m)| m.starts_with("ok:")));
-    assert!(ctx
-        .telemetry()
-        .iter()
-        .any(|(_, m)| m.contains("terminal (fail-fast)")));
+    assert!(!ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Log { message, .. } if message.starts_with("ok:"))
+    }));
+    assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Lifecycle {
+            event: LifecycleEvent::Crashed,
+            detail: Some(d),
+        } if d.contains("terminal (fail-fast)"))
+    }));
 }
 
 #[derive(Clone)]
@@ -379,13 +387,10 @@ impl Actor for Armer {
                 .unwrap(),
             }]
         } else {
-            vec![Effect::Emit {
-                level: Level::Info,
-                message: format!(
-                    "TICK:{}",
-                    letter.correlation.clone().unwrap_or_default()
-                ),
-            }]
+            vec![Effect::log(
+                Level::Info,
+                format!("TICK:{}", letter.correlation.clone().unwrap_or_default()),
+            )]
         }
     }
 }
@@ -402,15 +407,19 @@ fn ticker_fires_ticks_as_messages_on_the_injected_clock() {
     ))
     .unwrap();
     let l = Letter::new("test.go@1", nul(), None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "armer"), l, vec![]);
+    ctx.post(&addr("c1", "armer"), l, vec![], None);
     ctx.run_until_idle(50);
     assert!(
-        !ctx.telemetry().iter().any(|(_, m)| m.starts_with("TICK:")),
+        !ctx.telemetry().iter().any(|r| {
+            matches!(&r.payload, TelPayload::Log { message, .. } if message.starts_with("TICK:"))
+        }),
         "no tick before the deadline"
     );
     ctx.set_clock(Box::new(ManualClock(1600)));
     ctx.run_until_idle(50);
-    assert!(ctx.telemetry().iter().any(|(_, m)| m == "TICK:c9"));
+    assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Log { message, .. } if message == "TICK:c9")
+    }));
 }
 
 #[derive(Clone)]
@@ -440,23 +449,17 @@ impl Actor for BlobActor {
                     media_type,
                     size,
                 }) {
-                    Ok(bytes) => vec![Effect::Emit {
-                        level: Level::Info,
-                        message: format!(
-                            "READ:{}",
-                            String::from_utf8_lossy(&bytes)
-                        ),
-                    }],
-                    Err(e) => vec![Effect::Emit {
-                        level: Level::Error,
-                        message: format!("READ-ERR:{e:?}"),
-                    }],
+                    Ok(bytes) => vec![Effect::log(
+                        Level::Info,
+                        format!("READ:{}", String::from_utf8_lossy(&bytes)),
+                    )],
+                    Err(e) => vec![Effect::log(Level::Error, format!("READ-ERR:{e:?}"))],
                 }
             }
-            _ => vec![Effect::Emit {
-                level: Level::Warn,
-                message: format!("blobactor ignoring {}", letter.kind),
-            }],
+            _ => vec![Effect::log(
+                Level::Warn,
+                format!("blobactor ignoring {}", letter.kind),
+            )],
         }
     }
 }
@@ -514,11 +517,13 @@ fn blob_ref_in_hand_put_then_post_then_read() {
     )
     .unwrap();
     let w = Letter::new("test.publish@1", nul(), None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "pub"), w, vec![]);
+    ctx.post(&addr("c1", "pub"), w, vec![], None);
     ctx.run_until_idle(50);
     // Publisher eagerly put (blob.write), posted the ref, the reader
     // read it back — one pump, ref in hand throughout.
-    assert!(ctx.telemetry().iter().any(|(_, m)| m == "READ:hello"));
+    assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Log { message, .. } if message == "READ:hello")
+    }));
 
     // Round 28: a RANGE read seeks — the substr-backed provider
     // serves [4..10) of "hello" wait, wrong blob; use the 16-byte
@@ -544,25 +549,25 @@ struct RangePublisher {
             let mut out = Vec::new();
             // slice [4..10) → "456789"
             match host.blob_get_range(&r, 4, 6) {
-                Ok(bytes) => out.push(Effect::Emit {
-                    level: Level::Info,
-                    message: format!("RANGE:{}", String::from_utf8_lossy(&bytes)),
-                }),
-                Err(e) => out.push(Effect::Emit {
-                    level: Level::Error,
-                    message: format!("RANGE-ERR:{e:?}"),
-                }),
+                Ok(bytes) => out.push(Effect::log(
+                    Level::Info,
+                    format!("RANGE:{}", String::from_utf8_lossy(&bytes)),
+                )),
+                Err(e) => out.push(Effect::log(
+                    Level::Error,
+                    format!("RANGE-ERR:{e:?}"),
+                )),
             }
             // clamped over-run: offset 14, len 100 → "EF" (2 bytes)
             match host.blob_get_range(&r, 14, 100) {
-                Ok(bytes) => out.push(Effect::Emit {
-                    level: Level::Info,
-                    message: format!("CLAMP:{}:{}", bytes.len(), String::from_utf8_lossy(&bytes)),
-                }),
-                Err(e) => out.push(Effect::Emit {
-                    level: Level::Error,
-                    message: format!("CLAMP-ERR:{e:?}"),
-                }),
+                Ok(bytes) => out.push(Effect::log(
+                    Level::Info,
+                    format!("CLAMP:{}:{}", bytes.len(), String::from_utf8_lossy(&bytes)),
+                )),
+                Err(e) => out.push(Effect::log(
+                    Level::Error,
+                    format!("CLAMP-ERR:{e:?}"),
+                )),
             }
             out
         }
@@ -578,10 +583,13 @@ struct RangePublisher {
     )
     .unwrap();
     let rl = Letter::new("test.range@1", nul(), None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "rp"), rl, vec![]);
+    ctx.post(&addr("c1", "rp"), rl, vec![], None);
     ctx.run_until_idle(50);
-    assert!(ctx.telemetry().iter().any(|(_, m)| m == "RANGE:456789"));
-    assert!(ctx.telemetry().iter().any(|(_, m)| m == "CLAMP:2:EF"));
+    for want in ["RANGE:456789", "CLAMP:2:EF"] {
+        assert!(ctx.telemetry().iter().any(|r| {
+            matches!(&r.payload, TelPayload::Log { message, .. } if message == want)
+        }));
+    }
 
     // ROUND 28 SEMANTICS: the ref's mediaType is a HINT — content
     // identity resolves by digest, so a ref re-labeled in transit
@@ -597,9 +605,11 @@ struct RangePublisher {
         size: 5,
     });
     let fr = Letter::new("test.read@1", wrong_payload, None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "blob"), fr, vec![]);
+    ctx.post(&addr("c1", "blob"), fr, vec![], None);
     ctx.run_until_idle(50);
-    assert!(ctx.telemetry().iter().any(|(_, m)| m == "READ:hello"));
+    assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Log { message, .. } if message == "READ:hello")
+    }));
 }
 
 #[test]
@@ -633,7 +643,7 @@ struct EagerPutter;
     )
     .unwrap();
     let l = Letter::new("test.go@1", nul(), None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "atomic"), l, vec![]);
+    ctx.post(&addr("c1", "atomic"), l, vec![], None);
     ctx.run_until_idle(50);
     // The observable transaction held: the letter struck out, no
     // letter carrying the ref was ever committed anywhere.
@@ -660,11 +670,13 @@ fn mint_requires_the_source_row() {
     // actor does not hold by mutating the effect through a variant.)
     // Simplest honest test: mint succeeds when held, and caps-lists it.
     let l = Letter::new("test.mint@1", nul(), None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "mint"), l, vec![]);
+    ctx.post(&addr("c1", "mint"), l, vec![], None);
     let caps = Letter::new("test.caps@1", nul(), None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "mint"), caps, vec![]);
+    ctx.post(&addr("c1", "mint"), caps, vec![], None);
     ctx.run_until_idle(50);
-    assert!(ctx.telemetry().iter().any(|(_, m)| m == "CAPS:role.write,role.read"),
+    assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Log { message, .. } if message == "CAPS:role.write,role.read")
+    }),
         "mint added a row when the source was held: {:?}", ctx.telemetry());
 }
 
@@ -753,9 +765,9 @@ fn hydration_rebuilds_rows_and_ticker_schedules() {
     )
     .unwrap();
     let mint = Letter::new("test.mint@1", nul(), None, None, vec![]).unwrap();
-    ctx1.post(&addr("c1", "mint"), mint, vec![]);
+    ctx1.post(&addr("c1", "mint"), mint, vec![], None);
     let go = Letter::new("test.go@1", nul(), None, None, vec![]).unwrap();
-    ctx1.post(&addr("c1", "armer"), go, vec![]);
+    ctx1.post(&addr("c1", "armer"), go, vec![], None);
     ctx1.run_until_idle(50);
     drop(ctx1);
 
@@ -782,18 +794,18 @@ fn hydration_rebuilds_rows_and_ticker_schedules() {
 
     // The mint fact hydrated into the grant set (base row + mint).
     let caps = Letter::new("test.caps@1", nul(), None, None, vec![]).unwrap();
-    ctx2.post(&addr("c1", "mint"), caps, vec![]);
+    ctx2.post(&addr("c1", "mint"), caps, vec![], None);
     ctx2.run_until_idle(50);
     assert!(ctx2
         .telemetry()
         .iter()
-        .any(|(_, m)| m == "CAPS:role.write,role.read"));
+        .any(|r| matches!(&r.payload, TelPayload::Log { message, .. } if message == "CAPS:role.write,role.read")));
 
     // Time moves past the armed deadline; the HYDRATED schedule
     // fires: poll → tick → armer emits.
     ctx2.set_clock(Box::new(ManualClock(1600)));
     ctx2.run_until_idle(50);
-    assert!(ctx2.telemetry().iter().any(|(_, m)| m == "TICK:c9"));
+    assert!(ctx2.telemetry().iter().any(|r| matches!(&r.payload, TelPayload::Log { message, .. } if message == "TICK:c9")));
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
@@ -821,10 +833,10 @@ fn durable_context_survives_reopen() {
     ctx1.spawn(Spawn::new(Some("echo"), Box::new(|| Box::new(Echo))))
         .unwrap();
     let m1 = Letter::new("test.d@1", txt("m1"), None, Some("r1".into()), vec![]).unwrap();
-    ctx1.post(&addr("c1", "echo"), m1, vec![]);
+    ctx1.post(&addr("c1", "echo"), m1, vec![], None);
     ctx1.run_until_idle(50); // m1 delivered + replied (reply lost with ctx1's outbox view)
     let m2 = Letter::new("test.d@1", txt("m2"), None, Some("r2".into()), vec![]).unwrap();
-    ctx1.post(&addr("c1", "echo"), m2, vec![]);
+    ctx1.post(&addr("c1", "echo"), m2, vec![], None);
     // m2 stays PENDING — never delivered. ctx1 dies here.
     drop(ctx1);
 
@@ -838,7 +850,7 @@ fn durable_context_survives_reopen() {
 
     // m2 is still pending — exactly-once delivery from the journal.
     let m3 = Letter::new("test.d@1", txt("m3"), None, Some("r3".into()), vec![]).unwrap();
-    ctx2.post(&addr("c1", "echo"), m3, vec![]);
+    ctx2.post(&addr("c1", "echo"), m3, vec![], None);
     ctx2.run_until_idle(50);
     let replies = ctx2.drain_external();
     let mut payloads: Vec<Vec<u8>> = replies
@@ -882,15 +894,15 @@ impl Actor for GhostProbe {
         match host.ghost_read(lineage, from, to) {
             Ok(envs) => envs
                 .iter()
-                .map(|e| Effect::Emit {
-                    level: Level::Info,
-                    message: format!("GHOST:{}", payload_text(&e.letter.payload)),
-                })
+                .map(|e| Effect::log(
+                    Level::Info,
+                    format!("GHOST:{}", payload_text(&e.letter.payload)),
+                ))
                 .collect(),
-            Err(e) => vec![Effect::Emit {
-                level: Level::Error,
-                message: format!("GHOST-ERR:{e:?}"),
-            }],
+            Err(e) => vec![Effect::log(
+                    Level::Error,
+                    format!("GHOST-ERR:{e:?}"),
+                )],
         }
     }
 }
@@ -925,10 +937,10 @@ impl Actor for HydrationMinter {
             }],
             "test.caps@1" => {
                 let names: Vec<String> = host.caps().iter().map(|r| r.verb.clone()).collect();
-                vec![Effect::Emit {
-                    level: Level::Info,
-                    message: format!("CAPS:{}", names.join(",")),
-                }]
+                vec![Effect::log(
+                    Level::Info,
+                    format!("CAPS:{}", names.join(",")),
+                )]
             }
             _ => vec![],
         }
@@ -965,7 +977,7 @@ fn rewind_forks_a_readable_ghost_branch_behind_the_gate() {
     // Two notes land on lineage 1 (seqs 1, 2), delivered to probe-all.
     for payload in ["note-1", "note-2"] {
         let l = Letter::new("test.note@1", txt(payload), None, None, vec![]).unwrap();
-        ctx.post(&addr("c1", "probe-all"), l, vec![]);
+        ctx.post(&addr("c1", "probe-all"), l, vec![], None);
     }
     ctx.run_until_idle(50);
 
@@ -985,9 +997,11 @@ fn rewind_forks_a_readable_ghost_branch_behind_the_gate() {
             vec![],
         )
         .unwrap();
-        ctx.post(&addr("c1", "probe-all"), l, vec![]);
+        ctx.post(&addr("c1", "probe-all"), l, vec![], None);
         ctx.run_until_idle(50);
-        assert!(ctx.telemetry().iter().any(|(_, m)| m == "GHOST:note-1"));
+        assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Log { message, .. } if message == "GHOST:note-1")
+    }));
         let l = Letter::new(
             "test.probe@1",
             probe_payload(1, 2, 2),
@@ -996,10 +1010,12 @@ fn rewind_forks_a_readable_ghost_branch_behind_the_gate() {
             vec![],
         )
         .unwrap();
-        ctx.post(&addr("c1", "probe-all"), l, vec![]);
+        ctx.post(&addr("c1", "probe-all"), l, vec![], None);
         ctx.run_until_idle(50);
         assert!(
-            ctx.telemetry().iter().any(|(_, m)| m == "GHOST:note-2"),
+            ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Log { message, .. } if message == "GHOST:note-2")
+    }),
             "the ghost is readable by the wide grant"
         );
     };
@@ -1014,9 +1030,11 @@ fn rewind_forks_a_readable_ghost_branch_behind_the_gate() {
         vec![],
     )
     .unwrap();
-    ctx.post(&addr("c1", "probe-1"), l, vec![]);
+    ctx.post(&addr("c1", "probe-1"), l, vec![], None);
     ctx.run_until_idle(50);
-    assert!(ctx.telemetry().iter().any(|(_, m)| m == "GHOST:note-2"));
+    assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Log { message, .. } if message == "GHOST:note-2")
+    }));
 
     let l = Letter::new(
         "test.probe@1",
@@ -1026,12 +1044,12 @@ fn rewind_forks_a_readable_ghost_branch_behind_the_gate() {
         vec![],
     )
     .unwrap();
-    ctx.post(&addr("c1", "probe-1"), l, vec![]);
+    ctx.post(&addr("c1", "probe-1"), l, vec![], None);
     ctx.run_until_idle(50);
     assert!(ctx
         .telemetry()
         .iter()
-        .any(|(_, m)| m.contains("GHOST-ERR:Unauthorized")));
+        .any(|r| matches!(&r.payload, TelPayload::Log { message, .. } if message.contains("GHOST-ERR:Unauthorized"))));
 
     // Default-off: the grantless probe is denied outright.
     let l = Letter::new(
@@ -1042,17 +1060,19 @@ fn rewind_forks_a_readable_ghost_branch_behind_the_gate() {
         vec![],
     )
     .unwrap();
-    ctx.post(&addr("c1", "probe-none"), l, vec![]);
+    ctx.post(&addr("c1", "probe-none"), l, vec![], None);
     ctx.run_until_idle(50);
     assert!(ctx
         .telemetry()
         .iter()
-        .any(|(_, m)| m.contains("GHOST-ERR:Unauthorized")));
+        .any(|r| matches!(&r.payload, TelPayload::Log { message, .. } if message.contains("GHOST-ERR:Unauthorized"))));
     // And the grantless probe produced no ghost reads at all.
     let none_ghosts = ctx
         .telemetry()
         .iter()
-        .filter(|(_, m)| m == "GHOST:note-2")
+        .filter(|r| {
+            matches!(&r.payload, TelPayload::Log { message, .. } if message == "GHOST:note-2")
+        })
         .count();
     assert_eq!(
         none_ghosts, 2,
@@ -1121,7 +1141,7 @@ struct PublishTwo {
     )
     .unwrap();
     let l = Letter::new("test.put@1", nul(), None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "pub"), l, vec![]);
+    ctx.post(&addr("c1", "pub"), l, vec![], None);
     ctx.run_until_idle(50);
     assert_eq!(ctx.blob_count(), 2, "pre-GC: both allocations exist");
 
@@ -1134,10 +1154,12 @@ struct PublishTwo {
     // The survivor still verifies and reads — GC never breaks
     // references (round 12's hash-bound law intact).
     let l = Letter::new("test.read@1", kept_ref, None, None, vec![]).unwrap();
-    ctx.post(&addr("c1", "blob"), l, vec![]);
+    ctx.post(&addr("c1", "blob"), l, vec![], None);
     ctx.run_until_idle(50);
-    assert!(ctx.telemetry().iter().any(|(_, m)| m == "READ:referenced"));
-    assert!(!ctx.telemetry().iter().any(|(_, m)| m.contains("READ-ERR")));
+    assert!(ctx.telemetry().iter().any(|r| {
+        matches!(&r.payload, TelPayload::Log { message, .. } if message == "READ:referenced")
+    }));
+    assert!(!ctx.telemetry().iter().any(|r| matches!(&r.payload, TelPayload::Log { message, .. } if message.contains("READ-ERR"))));
 }
 
 #[test]
@@ -1222,7 +1244,7 @@ struct GhostPutter {
         )
         .unwrap();
         let l = Letter::new("test.put@1", nul(), None, None, vec![]).unwrap();
-        ctx.post(&addr("c1", "gp"), l, vec![]);
+        ctx.post(&addr("c1", "gp"), l, vec![], None);
         ctx.run_until_idle(50);
         ctx.rewind(1).expect("rewind orphans the ghost-ref letter");
     }
@@ -1289,16 +1311,13 @@ impl Actor for StatefulCounter {
             "test.add@1" => {
                 let add: u64 = payload_text(&letter.payload).parse().unwrap_or(0);
                 self.count += add;
-                let mut out = vec![Effect::Emit {
-                    level: Level::Info,
-                    message: format!("COUNT:{}", self.count),
-                }];
+                let mut out = vec![Effect::log(
+                    Level::Info,
+                    format!("COUNT:{}", self.count),
+                )];
                 if self.restored {
                     self.restored = false;
-                    out.push(Effect::Emit {
-                        level: Level::Info,
-                        message: "RESTORED".into(),
-                    });
+                    out.push(Effect::log(Level::Info, "RESTORED"));
                 }
                 out
             }
@@ -1389,14 +1408,14 @@ fn snapshot_letter_survives_reopen_and_restores_state_and_cursor() {
         spawn_counter(&mut ctx);
         for n in ["1", "2"] {
             let l = Letter::new("test.add@1", txt(n), None, None, vec![]).unwrap();
-            ctx.post(&addr("c1", "counter"), l, vec![]);
+            ctx.post(&addr("c1", "counter"), l, vec![], None);
         }
         ctx.run_until_idle(50);
         let snap_req = Letter::new("test.snap@1", nul(), None, None, vec![]).unwrap();
-        ctx.post(&addr("c1", "counter"), snap_req, vec![]);
+        ctx.post(&addr("c1", "counter"), snap_req, vec![], None);
         ctx.run_until_idle(50);
         let l = Letter::new("test.add@1", txt("3"), None, None, vec![]).unwrap();
-        ctx.post(&addr("c1", "counter"), l, vec![]);
+        ctx.post(&addr("c1", "counter"), l, vec![], None);
         drop(ctx);
     }
 
@@ -1412,11 +1431,11 @@ fn snapshot_letter_survives_reopen_and_restores_state_and_cursor() {
     ctx2.run_until_idle(50);
     // 1 + 2 restored FROM THE SNAPSHOT; 3 delivered live from the
     // pending journal letter. No double-count, no loss.
-    assert!(ctx2.telemetry().iter().any(|(_, m)| m == "COUNT:6"));
+    assert!(ctx2.telemetry().iter().any(|r| matches!(&r.payload, TelPayload::Log { message, .. } if message == "COUNT:6")));
     // ROUND 39: the RESTORE path must have run — before this, the
     // test passed vacuously (full replay reached the same count).
     assert!(
-        ctx2.telemetry().iter().any(|(_, m)| m == "RESTORED"),
+        ctx2.telemetry().iter().any(|r| matches!(&r.payload, TelPayload::Log { message, .. } if message == "RESTORED")),
         "the snapshot restore ran (not full-replay luck): {:?}",
         ctx2.telemetry()
     );
@@ -1519,6 +1538,7 @@ struct Ping {
         },
         l,
         vec![],
+        None,
     );
     ctx.run_until_idle(1_000_000);
     let elapsed = start.elapsed();
@@ -1527,7 +1547,10 @@ struct Ping {
     let count = ctx
         .telemetry()
         .iter()
-        .filter(|(_, m)| m.contains("PONG") || m.contains("COUNT"))
+        .filter(|r| {
+            matches!(&r.payload, TelPayload::Log { message, .. }
+                if message.contains("PONG") || message.contains("COUNT"))
+        })
         .count();
 
     eprintln!(

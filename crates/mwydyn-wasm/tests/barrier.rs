@@ -9,6 +9,7 @@
 //!    bouncing a nested work-order tree through the Context pump —
 //!    decode/encode exercised in BOTH realms every hop.
 
+use mwydyn_data::telemetry::{LifecycleEvent, TelPayload};
 use mwydyn_core::{Context, Spawn};
 use mwydyn_data::barrier::BarrierEffect;
 use mwydyn_data::{address_to_value, decode, encode, Address, DecodeOptions, Letter, Value};
@@ -62,10 +63,10 @@ impl mwydyn_core::Actor for Collector {
         _host: &mwydyn_core::Host,
         letter: &Letter,
     ) -> Vec<mwydyn_core::Effect> {
-        vec![mwydyn_core::Effect::Emit {
-            level: mwydyn_core::Level::Info,
-            message: format!("{}:{}:{}", self.tag, letter.kind, letter.payload.len()),
-        }]
+        vec![mwydyn_core::Effect::log(
+            mwydyn_core::Level::Info,
+            format!("{}:{}:{}", self.tag, letter.kind, letter.payload.len()),
+        )]
     }
 }
 
@@ -105,7 +106,7 @@ fn barrier_mechanics_round_trip() {
 
     let kick = Letter::new("test.kick@1", encode(&Value::Text("go".into())), None, None, vec![])
         .unwrap();
-    ctx.post(&addr("bm", "guest"), kick, vec![]);
+    ctx.post(&addr("bm", "guest"), kick, vec![], None);
     ctx.run_until_idle(50);
 
     // The container's request/alloc/write → process → read/decode
@@ -113,7 +114,10 @@ fn barrier_mechanics_round_trip() {
     assert!(
         ctx.telemetry()
             .iter()
-            .any(|(_, m)| m.starts_with("s:test.canned@1:")),
+            .any(|r| {
+                matches!(&r.payload, TelPayload::Log { message, .. }
+                    if message.starts_with("s:test.canned@1:"))
+            }),
         "canned guest effect landed: {:?}",
         ctx.telemetry()
     );
@@ -146,14 +150,19 @@ fn byzantine_guest_responses_are_crashes_not_swallows() {
     .unwrap();
     let kick =
         Letter::new("test.kick@1", encode(&Value::Text("go".into())), None, None, vec![]).unwrap();
-    ctx.post(&addr("bz", "liar"), kick, vec![]);
+    ctx.post(&addr("bz", "liar"), kick, vec![], None);
     ctx.run_until_idle(50);
 
     assert_eq!(ctx.dead_letters().len(), 1, "the poison letter dead-letters");
     assert!(
         ctx.telemetry()
             .iter()
-            .any(|(_, m)| m.contains("crashed") || m.contains("restarted")),
+            .any(|r| {
+                matches!(&r.payload, TelPayload::Lifecycle {
+                    event: LifecycleEvent::Crashed,
+                    detail: Some(d),
+                } if d.contains("crashed") || d.contains("restarted"))
+            }),
         "crash path telemetry: {:?}",
         ctx.telemetry()
     );
@@ -244,7 +253,7 @@ fn compiled_guest_work_order_bounce() {
         vec![],
     )
     .unwrap();
-    ctx.post(&addr("wo", "ping"), kick, vec![]);
+    ctx.post(&addr("wo", "ping"), kick, vec![], None);
     ctx.run_until_idle(200);
 
     let drained = ctx.drain_external();
@@ -317,7 +326,7 @@ fn compiled_guest_work_order_throughput() {
     ])
     .unwrap());
     let kick = Letter::new("test.work-order@1", payload, None, None, vec![]).unwrap();
-    ctx.post(&addr("wp", "ping"), kick, vec![]);
+    ctx.post(&addr("wp", "ping"), kick, vec![], None);
     let start = std::time::Instant::now();
     ctx.run_until_idle(100_000);
     let elapsed = start.elapsed();
@@ -382,7 +391,7 @@ fn pool_runs_wasm_guests_and_natives_alike() {
     ])
     .unwrap());
     let kick = Letter::new("test.work-order@1", payload, None, None, vec![]).unwrap();
-    ctx.post(&addr("wpool", "ping"), kick, vec![]);
+    ctx.post(&addr("wpool", "ping"), kick, vec![], None);
     ctx.run_until_idle(500);
     let drained = ctx.drain_external();
     assert_eq!(drained.len(), 1, "the pooled bounce completed");
@@ -456,7 +465,7 @@ fn wasm_guest_transitions_parallelize() {
                 ])
                 .unwrap());
                 let l = Letter::new("test.work-order@1", payload, None, None, vec![]).unwrap();
-                ctx.post(&addr("wt", &format!("guest-{g}")), l, vec![]);
+                ctx.post(&addr("wt", &format!("guest-{g}")), l, vec![], None);
             }
         }
         let stats = ctx.run_until_idle(10_000);

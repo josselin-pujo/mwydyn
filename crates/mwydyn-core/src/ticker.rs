@@ -83,10 +83,10 @@ impl Actor for Ticker {
                         });
                         Vec::new()
                     }
-                    None => vec![Effect::Emit {
-                        level: Level::Warn,
-                        message: "ticker: malformed arm payload — ignored".into(),
-                    }],
+                    None => vec![Effect::log(
+                        Level::Warn,
+                        "ticker: malformed arm payload — ignored",
+                    )],
                 }
             }
             TIMER_POLL_KIND => {
@@ -113,10 +113,10 @@ impl Actor for Ticker {
                     })
                     .collect()
             }
-            other => vec![Effect::Emit {
-                level: Level::Warn,
-                message: format!("ticker: ignoring unknown kind {other}"),
-            }],
+            other => vec![Effect::log(
+                Level::Warn,
+                format!("ticker: ignoring unknown kind {other}"),
+            )],
         }
     }
 

@@ -4,17 +4,9 @@
 //! import, only reads (§3.5).
 
 use crate::blob::{BlobAccess, BlobRef};
+pub use mwydyn_data::telemetry::Level;
+use mwydyn_data::telemetry::{Instrument, TelPayload, TelemetryKind, TelemetryRecord};
 use mwydyn_data::{Address, Envelope, Letter};
-
-/// Telemetry levels (§3.2: lossy by design, outside the transaction).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Level {
-    Trace,
-    Debug,
-    Info,
-    Warn,
-    Error,
-}
 
 /// Effects declared by `receive`, applied by the runtime in order
 /// after validate-all (§3.5). ONLY the observable things — `put` is
@@ -35,10 +27,75 @@ pub enum Effect {
         verb: String,
         object: String,
     },
+    /// Best-effort telemetry (§3.6, round 44): actors declare `log`
+    /// and `metric` records ONLY — the runtime kinds are refused at
+    /// Phase 2 (compose parity with the barrier's declare gate).
+    /// `ts`/`actor`/`seq` are runtime-minted at apply; the record
+    /// arrives unstamped (build via the helpers, not by hand).
     Emit {
-        level: Level,
-        message: String,
+        record: TelemetryRecord,
     },
+}
+
+impl Effect {
+    /// A log record (§3.6) — the ergonomic form of
+    /// `Effect::Emit` for actors.
+    pub fn log(level: Level, message: impl Into<String>) -> Effect {
+        Effect::Emit {
+            record: TelemetryRecord::declared(
+                TelemetryKind::Log,
+                TelPayload::Log { level, message: message.into(), attrs: None },
+            ),
+        }
+    }
+
+    /// A log record with attributes (must be a canonical map —
+    /// enforced at Phase 2 like every other shape law).
+    pub fn log_with(level: Level, message: impl Into<String>, attrs: mwydyn_data::Value) -> Effect {
+        Effect::Emit {
+            record: TelemetryRecord::declared(
+                TelemetryKind::Log,
+                TelPayload::Log { level, message: message.into(), attrs: Some(attrs) },
+            ),
+        }
+    }
+
+    /// A metric observation (§3.6): points-not-aggregates, temporality
+    /// always delta — the sink aggregates.
+    pub fn metric(
+        name: impl Into<String>,
+        instrument: Instrument,
+        value: f64,
+    ) -> Effect {
+        Effect::Emit {
+            record: TelemetryRecord::declared(
+                TelemetryKind::Metric,
+                TelPayload::Metric { name: name.into(), instrument, value, unit: None, attrs: None },
+            ),
+        }
+    }
+
+    /// A metric observation with unit and/or attributes.
+    pub fn metric_with(
+        name: impl Into<String>,
+        instrument: Instrument,
+        value: f64,
+        unit: Option<&str>,
+        attrs: Option<mwydyn_data::Value>,
+    ) -> Effect {
+        Effect::Emit {
+            record: TelemetryRecord::declared(
+                TelemetryKind::Metric,
+                TelPayload::Metric {
+                    name: name.into(),
+                    instrument,
+                    value,
+                    unit: unit.map(str::to_string),
+                    attrs,
+                },
+            ),
+        }
+    }
 }
 
 /// Grant row `{verb, object}` (spec §3.3). Checked per-use against

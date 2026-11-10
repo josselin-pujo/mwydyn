@@ -65,7 +65,7 @@ fn run_store(spawn_uncapped: bool) -> std::collections::HashMap<String, Value> {
         .supervision(Supervision::Restart),
     )
     .unwrap();
-    ctx.post(&addr("am", "store"), store_kick(b"ambient-body-42"), vec![]);
+    ctx.post(&addr("am", "store"), store_kick(b"ambient-body-42"), vec![], None);
     ctx.run_until_idle(300);
     receipt_of(&mut ctx)
 }

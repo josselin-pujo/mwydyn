@@ -88,6 +88,32 @@
   response envelope spellings (generator + harness, barrier-v0's
   pattern). Remaining: mwydyn-stdlib (the merge actor); guest SDKs
   beyond Rust.
+- **Telemetry outbox (round 44, spec §3.6, DECIDED):** closed-kind
+  records (`log | metric | exchange | lifecycle | refusal | drop`),
+  runtime-minted `ts`/`actor`/`seq`, core-attached lineage (one
+  `exchange` record per delivery attempt = the span skeleton),
+  shared bounded ring + `drain_telemetry()` with leading `drop`
+  records, ungated emission, the injection handle (`post` returns
+  seq, accepts a core-validated parent). OTel mapping stays out of
+  core, out of scope. Landed as three commits, each independently
+  green:
+  1. **data + core** — `mwydyn-data/src/telemetry.rs` (record +
+     canonical forms + guest-declare subset); core: `Effect::Emit
+     { record }` + helpers, the ring/drain/drop ledger, exchange/
+     lifecycle/refusal minting in the pump paths, injection handle.
+     Done when: workspace tests + clippy green with the old
+     `Vec<(Level, String)>` gone.
+  2. **barrier + SDK** — barrier response grows the additive
+     `emit` verb (guest-declarable kinds `log|metric` ONLY — the
+     runtime kinds are refused at the barrier); wasm container
+     maps it; `mwydyn-guest` gains `Effect::emit`/`log`/metric
+     helpers. Done when: a guest's emit lands in the drain
+     stream, stamped by the core (compose-parity proof).
+  3. **vectors** — `telemetry-v0` corpus (canonical forms per
+     kind, unknown-kind refusal, drop + exchange forms, the
+     guest-declare form without minted fields) + generator +
+     harness. Done when: `cargo test -p mwydyn-vectors` green on
+     the committed corpus.
 - **M4 — the A1 corpus, conformance-green.** `cbor-v1.json` et al.
   pass in `mwydyn-vectors`; every DECIDED spec section has vectors;
   spec v0 declared complete.

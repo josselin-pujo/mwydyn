@@ -67,7 +67,7 @@ fn context_group_commit_throughput() {
         vec![],
     )
     .unwrap();
-    ctx.post(&addr("perf", "a"), kick, vec![]);
+    ctx.post(&addr("perf", "a"), kick, vec![], None);
 
     let start = std::time::Instant::now();
     ctx.run_until_idle(10_000_000);

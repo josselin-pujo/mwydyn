@@ -9,6 +9,7 @@
 //! equivalence.
 
 use mwydyn_core::{Actor, Context, Effect, Host, Level, MsgCtx, Spawn, Supervision};
+use mwydyn_data::telemetry::TelPayload;
 use mwydyn_data::{decode, encode, Address, DecodeOptions, Letter, Value};
 
 fn cbor_text(s: &str) -> Vec<u8> {
@@ -74,7 +75,7 @@ fn fan_out_lands_every_letter_under_parallel_transitions() {
             vec![],
         )
         .unwrap();
-        ctx.post(&addr("fan", target), l, vec![]);
+        ctx.post(&addr("fan", target), l, vec![], None);
     }
     ctx.run_until_idle(4_000);
 
@@ -126,10 +127,10 @@ fn busy_refusal_rolls_back_and_heals_under_parallel() {
             Box::new(self.clone())
         }
         fn receive(&mut self, _ctx: &MsgCtx, _host: &Host, letter: &Letter) -> Vec<Effect> {
-            vec![Effect::Emit {
-                level: Level::Info,
-                message: format!("{}:{}", self.tag, decode_text(&letter.payload)),
-            }]
+            vec![Effect::log(
+                Level::Info,
+                format!("{}:{}", self.tag, decode_text(&letter.payload)),
+            )]
         }
     }
     fn decode_text(bytes: &[u8]) -> String {
@@ -164,10 +165,10 @@ fn busy_refusal_rolls_back_and_heals_under_parallel() {
     .unwrap();
     for _ in 0..2 {
         let l = Letter::new("test.pre@1", cbor_text("p"), None, None, vec![]).unwrap();
-        ctx.post(&addr("busy", "sink"), l, vec![]);
+        ctx.post(&addr("busy", "sink"), l, vec![], None);
     }
     let go = Letter::new("test.go@1", cbor_text("g"), None, None, vec![]).unwrap();
-    ctx.post(&addr("busy", "dbl"), go, vec![]);
+    ctx.post(&addr("busy", "dbl"), go, vec![], None);
     ctx.run_until_idle(1_000);
 
     // All four letters eventually landed (2 pre + 2 doubled), busy
@@ -175,7 +176,10 @@ fn busy_refusal_rolls_back_and_heals_under_parallel() {
     let emissions = ctx
         .telemetry()
         .iter()
-        .filter(|(_, m)| m.starts_with("s:p") || m.starts_with("s:x"))
+        .filter(|r| {
+            matches!(&r.payload, TelPayload::Log { message, .. }
+                if message.starts_with("s:p") || message.starts_with("s:x"))
+        })
         .count();
     assert_eq!(emissions, 4, "all four letters landed: {:?}", ctx.telemetry());
     assert!(ctx.dead_letters().is_empty());
@@ -193,10 +197,10 @@ fn poison_dead_letters_through_the_strike_path_under_parallel() {
             if letter.payload == cbor_text("boom") {
                 panic!("synthetic boom");
             }
-            vec![Effect::Emit {
-                level: Level::Info,
-                message: format!("ok:{}", decode_text(&letter.payload)),
-            }]
+            vec![Effect::log(
+                Level::Info,
+                format!("ok:{}", decode_text(&letter.payload)),
+            )]
         }
     }
     fn decode_text(bytes: &[u8]) -> String {
@@ -214,12 +218,14 @@ fn poison_dead_letters_through_the_strike_path_under_parallel() {
     .unwrap();
     for payload in ["boom", "fine"] {
         let l = Letter::new("test.p@1", cbor_text(payload), None, None, vec![]).unwrap();
-        ctx.post(&addr("poison", "pan"), l, vec![]);
+        ctx.post(&addr("poison", "pan"), l, vec![], None);
     }
     ctx.run_until_idle(500);
     assert_eq!(ctx.dead_letters().len(), 1, "poison dead-letters");
     assert!(
-        ctx.telemetry().iter().any(|(_, m)| m == "ok:fine"),
+        ctx.telemetry().iter().any(|r| {
+            matches!(&r.payload, TelPayload::Log { message, .. } if message == "ok:fine")
+        }),
         "the healthy letter still ran"
     );
 }
@@ -247,7 +253,7 @@ fn pool_and_serial_agree_on_outcomes() {
                 vec![],
             )
             .unwrap();
-            ctx.post(&addr("equiv", "echo"), l, vec![]);
+            ctx.post(&addr("equiv", "echo"), l, vec![], None);
         }
         ctx.run_until_idle(1_000);
         let mut replies: Vec<String> = ctx
@@ -298,7 +304,7 @@ fn fan_out_parallel_throughput_report() {
                 vec![],
             )
             .unwrap();
-            ctx.post(&addr("tp", &target), l, vec![]);
+            ctx.post(&addr("tp", &target), l, vec![], None);
         }
         let stats = ctx.run_until_idle(20_000);
         let elapsed = start.elapsed();

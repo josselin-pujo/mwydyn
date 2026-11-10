@@ -108,13 +108,13 @@ fn counter_receipt_after_poison() -> i64 {
 
     // THE POISON: its effects target a nonexistent actor — Phase 2
     // strikes; the letter dead-letters after MAX_ATTEMPTS.
-    ctx.post(&addr("sf", "ctr"), kick("sf", "void", None), vec![]);
+    ctx.post(&addr("sf", "ctr"), kick("sf", "void", None), vec![], None);
     ctx.run_until_idle(500);
     assert_eq!(ctx.dead_letters().len(), 1, "the poison letter dead-letters");
     assert!(ctx.drain_external().is_empty(), "no receipts for refused effects");
 
     // THE HONEST LETTER.
-    ctx.post(&addr("sf", "ctr"), kick("sf", "external", None), vec![]);
+    ctx.post(&addr("sf", "ctr"), kick("sf", "external", None), vec![], None);
     ctx.run_until_idle(500);
     let drained = ctx.drain_external();
     assert_eq!(drained.len(), 1, "the honest letter's receipt");
@@ -162,20 +162,20 @@ fn dedup_first_after_poison(artifact_name: &str) -> bool {
     .unwrap();
 
     // sanity: a fresh correlation is a first
-    ctx.post(&addr("dd", "dd"), kick("dd", "external", Some("a".into())), vec![]);
+    ctx.post(&addr("dd", "dd"), kick("dd", "external", Some("a".into())), vec![], None);
     ctx.run_until_idle(100);
     let drained = ctx.drain_external();
     assert_eq!(drained.len(), 1, "the fresh letter's receipt");
     assert!(receipt_flag(&drained[0].letter, "first"));
 
     // THE POISON: correlation "b", effects to void → dead-letter
-    ctx.post(&addr("dd", "dd"), kick("dd", "void", Some("b".into())), vec![]);
+    ctx.post(&addr("dd", "dd"), kick("dd", "void", Some("b".into())), vec![], None);
     ctx.run_until_idle(300);
     assert_eq!(ctx.dead_letters().len(), 1, "the poison letter dead-letters");
     assert!(ctx.drain_external().is_empty(), "no receipts for refused effects");
 
     // THE QUESTION: is "b" still fresh?
-    ctx.post(&addr("dd", "dd"), kick("dd", "external", Some("b".into())), vec![]);
+    ctx.post(&addr("dd", "dd"), kick("dd", "external", Some("b".into())), vec![], None);
     ctx.run_until_idle(100);
     let drained = ctx.drain_external();
     assert_eq!(drained.len(), 1, "the honest letter's receipt");
@@ -259,13 +259,13 @@ fn stateful_guest_snapshot_survives_reopen_and_is_exactly_once() {
         );
         spawn_ctr(&mut ctx);
         for _ in 0..3 {
-            ctx.post(&addr("sf", "ctr"), kick("sf", "external", None), vec![]);
+            ctx.post(&addr("sf", "ctr"), kick("sf", "external", None), vec![], None);
             ctx.run_until_idle(100);
         }
         assert_eq!(drain_counts(&mut ctx), vec![1, 2, 3]);
         ctx.snapshot_actor("ctr").expect("runtime save");
         // one more letter, PENDING across the death (never delivered)
-        ctx.post(&addr("sf", "ctr"), kick("sf", "external", None), vec![]);
+        ctx.post(&addr("sf", "ctr"), kick("sf", "external", None), vec![], None);
         drop(ctx); // ---- the death line ----
     }
 

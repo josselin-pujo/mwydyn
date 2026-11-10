@@ -147,6 +147,23 @@ pub trait JournalRead: Send + Sync {
     /// serve, counting the shared prefix delegated to ancestors.
     /// Ghost reads and GC reachability scans both need this.
     fn covered(&self, context: &str, lineage: u64) -> Result<u64, JournalError>;
+    /// Does `seq` exist on ANY lineage? Seqs are contiguous from 1
+    /// with shared prefixes (§8), so `covered ≥ seq` settles it.
+    /// ROUND 44 — the injection parent's validation gate (§3.4):
+    /// a parent the core does not know is refused, loudly, at
+    /// injection. Providers inherit this; override only if the
+    /// default's per-lineage walk shows up in a profile.
+    fn seq_exists(&self, context: &str, seq: u64) -> Result<bool, JournalError> {
+        if seq == 0 {
+            return Ok(false);
+        }
+        for lin in self.lineages(context)? {
+            if self.covered(context, lin.id)? >= seq {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     /// All letters addressed to `actor` with seq in `1..=up_to`, in
     /// seq order — delivered AND undelivered. THE HYDRATION READ
     /// (round 26): replay `1..=cursor` through a fresh instance with

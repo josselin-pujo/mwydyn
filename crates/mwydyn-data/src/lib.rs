@@ -12,6 +12,7 @@ pub mod barrier;
 pub mod decode;
 pub mod encode;
 pub mod envelope;
+pub mod telemetry;
 
 pub use decode::decode;
 pub use encode::encode;

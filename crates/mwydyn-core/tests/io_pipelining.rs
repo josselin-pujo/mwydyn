@@ -180,7 +180,7 @@ fn pipelined_run(tag: &str, k: usize, exchanges: i64) -> (usize, usize, Arc<Mute
     )
     .unwrap();
     let kick = Letter::new("test.bounce@1", cbor_int(exchanges), None, None, vec![]).unwrap();
-    ctx.post(&addr("io", "a"), kick, vec![]);
+    ctx.post(&addr("io", "a"), kick, vec![], None);
     ctx.run_until_idle(2 * exchanges as usize);
     // THE BARRIER: quiescence drains are policy-respecting; the
     // explicit barrier call completes the final window.
@@ -271,7 +271,7 @@ fn one_explicit_flush_is_one_sqlite_transaction() {
     .unwrap();
     let n = 2_000i64;
     let kick = Letter::new("test.bounce@1", cbor_int(n), None, None, vec![]).unwrap();
-    ctx.post(&addr("io", "a"), kick, vec![]);
+    ctx.post(&addr("io", "a"), kick, vec![], None);
     ctx.run_until_idle(4_000);
 
     let before = commits.load(Ordering::SeqCst);
@@ -325,7 +325,7 @@ fn crash_before_drain_redoes_from_the_durable_point() {
         .unwrap();
     for i in 0..10 {
         let l = Letter::new("test.m@1", cbor_int(i), None, Some(format!("r{i}")), vec![]).unwrap();
-        ctx1.post(&addr("io", "echo"), l, vec![]);
+        ctx1.post(&addr("io", "echo"), l, vec![], None);
     }
     ctx1.run_until_idle(200);
     let drained_commits = commits.load(Ordering::SeqCst);
@@ -355,7 +355,7 @@ fn crash_before_drain_redoes_from_the_durable_point() {
     assert!(replays >= 10, "all delivered letters replay: {replays}");
     for i in 10..14 {
         let l = Letter::new("test.m@1", cbor_int(i), None, Some(format!("r{i}")), vec![]).unwrap();
-        ctx2.post(&addr("io", "echo"), l, vec![]);
+        ctx2.post(&addr("io", "echo"), l, vec![], None);
     }
     ctx2.run_until_idle(200);
     ctx2.flush_durability().expect("final barrier");

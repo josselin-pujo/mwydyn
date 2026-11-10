@@ -81,13 +81,20 @@ struct WaveOutcome {
     /// parallelizes the fork too, which is the expensive half for
     /// WASM guests (module re-instantiation).
     rollback: Box<dyn Actor>,
+    /// The dispatch wall stamp (round 44, §3.6) — rides back so the
+    /// committer's exchange records carry real durations without a
+    /// second clock read or a map lookup.
+    now: i64,
 }
 
 
-use crate::actor::{Actor, CapRow, Effect, Host, Level, MsgCtx};
+use crate::actor::{Actor, CapRow, Effect, Host, MsgCtx};
 use crate::blob::{BlobFace, BlobRef, RamBlobStore};
 use crate::journal::{InMemoryJournal, JournalError, JournalFace, JournalOp, JournalRead, MintFact, Pending};
 use crate::ticker::Ticker;
+use mwydyn_data::telemetry::{
+    LifecycleEvent, Outcome, TelPayload, TelemetryKind, TelemetryRecord,
+};
 
 /// The embedding's instance id — posts FROM here; replies TO it land
 /// in the drainable external outbox (§3.4: the embedding's handle).
@@ -102,6 +109,10 @@ pub const DEFAULT_MAX_OPS_PER_FLUSH: usize = 256;
 /// Poison-letter strikes before the dead-letter path (§3.1's
 /// policy-authorized cursor advance).
 pub const MAX_ATTEMPTS: u64 = 3;
+
+/// ROUND 44 — the telemetry ring's default capacity (§3.6): the
+/// storm valve. Lossiness lives HERE, never at emission.
+pub const DEFAULT_TELEMETRY_CAPACITY: usize = 4096;
 
 /// The snapshots sink's well-known name (runtime-reserved, collocated
 /// like the ticker — round 29).
@@ -172,7 +183,10 @@ pub enum RefuseReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    Accepted,
+    /// The letter was journaled — `seq` is its stamped identity
+    /// (round 44, §3.4: the injection handle; external sources map
+    /// their own ids against it, and a reply may cite it as parent).
+    Accepted { seq: u64 },
     Refused(RefuseReason),
 }
 
@@ -402,7 +416,19 @@ pub struct Context {
     /// journaled (everything committed is); this is the convenience
     /// view.
     external_outbox: VecDeque<Envelope>,
-    telemetry: Vec<(Level, String)>,
+    /// ROUND 44 — the telemetry outbox (§3.6): one bounded ring per
+    /// context, drop-oldest. "Never backpressures" is structural:
+    /// when the ring is full the OLDEST record falls out and the
+    /// drop ledger counts it; business flow never waits on telemetry.
+    telemetry: VecDeque<TelemetryRecord>,
+    /// The ring's capacity (builder knob, default 4096).
+    telemetry_cap: usize,
+    /// Drops since the last drain, by kind — a drain that lost
+    /// records leads with a `drop` record carrying this ledger.
+    telemetry_dropped: HashMap<String, u64>,
+    /// Whether the pump mints `exchange` records (the span
+    /// skeleton, §3.6). Default ON; benchmarks turn it off.
+    exchange_records: bool,
     /// RAM mirror of the journal's dead-letter facts (the fact is the
     /// truth; this is the accessor).
     dead_letters: Vec<Envelope>,
@@ -462,7 +488,10 @@ impl Context {
             max_ops_per_flush: DEFAULT_MAX_OPS_PER_FLUSH,
             workers: 0,
             external_outbox: VecDeque::new(),
-            telemetry: Vec::new(),
+            telemetry: VecDeque::new(),
+            telemetry_cap: DEFAULT_TELEMETRY_CAPACITY,
+            telemetry_dropped: HashMap::new(),
+            exchange_records: true,
             dead_letters: Vec::new(),
             strikes: HashMap::new(),
             clock: Box::new(WallClock),
@@ -511,7 +540,10 @@ impl Context {
             max_ops_per_flush: DEFAULT_MAX_OPS_PER_FLUSH,
             workers: 0,
             external_outbox: VecDeque::new(),
-            telemetry: Vec::new(),
+            telemetry: VecDeque::new(),
+            telemetry_cap: DEFAULT_TELEMETRY_CAPACITY,
+            telemetry_dropped: HashMap::new(),
+            exchange_records: true,
             dead_letters: Vec::new(),
             strikes: HashMap::new(),
             clock: Box::new(WallClock),
@@ -551,8 +583,65 @@ impl Context {
         self.clock = clock;
     }
 
-    pub fn telemetry(&self) -> &[(Level, String)] {
-        &self.telemetry
+    /// The telemetry outbox, undrained (§3.6) — the observation
+    /// view (a copy; the ring may wrap, so no slice view exists).
+    /// [`Context::drain_telemetry`] is the consumption handle.
+    pub fn telemetry(&self) -> Vec<TelemetryRecord> {
+        self.telemetry.iter().cloned().collect()
+    }
+
+    /// Drain the telemetry outbox (§3.6) — the embedding's handle,
+    /// `drain_external`'s sibling. A drain that lost records since
+    /// the last one LEADS with a synthetic `drop` record: the
+    /// pipeline carries its own loss ledger.
+    pub fn drain_telemetry(&mut self) -> Vec<TelemetryRecord> {
+        let mut out = Vec::new();
+        if !self.telemetry_dropped.is_empty() {
+            let dropped: u64 = self.telemetry_dropped.values().sum();
+            let by_kind = {
+                let mut v: Vec<(String, u64)> =
+                    self.telemetry_dropped.drain().collect();
+                v.sort_by(|a, b| (a.0.len(), &a.0).cmp(&(b.0.len(), &b.0)));
+                v
+            };
+            out.push(TelemetryRecord {
+                kind: TelemetryKind::Drop,
+                ts: self.clock.now_micros(),
+                actor: String::new(),
+                seq: 0,
+                payload: TelPayload::Drop { dropped, by_kind },
+            });
+        }
+        out.extend(self.telemetry.drain(..));
+        out
+    }
+
+    /// The ring write (§3.6): drop-oldest at capacity, the ledger
+    /// counts the loss. Records arrive PRE-STAMPED — every producer
+    /// mints `ts`/`actor`/`seq` at its own site; nothing rides
+    /// unstamped.
+    fn push_telemetry(&mut self, record: TelemetryRecord) {
+        if self.telemetry.len() >= self.telemetry_cap {
+            if let Some(oldest) = self.telemetry.pop_front() {
+                *self
+                    .telemetry_dropped
+                    .entry(oldest.kind.as_str().to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+        self.telemetry.push_back(record);
+    }
+
+    /// The runtime's own exchange record (§3.6 lineage attachment):
+    /// the span skeleton, one per delivery attempt. `ts` is ts_out.
+    fn exchange_record(&self, seq: u64, actor: &str, from: &Address, ack: Option<u64>, ts_in: i64, outcome: Outcome) -> TelemetryRecord {
+        TelemetryRecord {
+            kind: TelemetryKind::Exchange,
+            ts: self.clock.now_micros(),
+            actor: actor.to_string(),
+            seq,
+            payload: TelPayload::Exchange { from: from.clone(), ack, ts_in, outcome },
+        }
     }
 
     pub fn dead_letters(&self) -> &[Envelope] {
@@ -674,6 +763,18 @@ impl Context {
             self.by_name.insert(n.clone(), entry_idx);
         }
         self.by_id.insert(id.clone(), entry_idx);
+        // §3.2 lifecycle fact as telemetry (§3.6): the runtime
+        // declares `spawned` — the embedding's view of the cast.
+        self.push_telemetry(TelemetryRecord {
+            kind: TelemetryKind::Lifecycle,
+            ts: self.clock.now_micros(),
+            actor: id.clone(),
+            seq: 0,
+            payload: TelPayload::Lifecycle {
+                event: LifecycleEvent::Spawned,
+                detail: spec.name.clone(),
+            },
+        });
         Ok(Handle {
             id,
             name: spec.name,
@@ -699,35 +800,81 @@ impl Context {
         }
     }
 
-    /// External post (the embedding caller speaks from `external`).
-    /// The letter is JOURNALED first — write-before-delivery (§8.2) —
+    /// External post — the injection handle (§3.4, round 44). The
+    /// letter is JOURNALED first — write-before-delivery (§8.2) —
     /// then it is simply *pending*: delivery reads the journal.
-    pub fn post(&mut self, to: &Address, letter: Letter, authority: Vec<String>) -> Verdict {
+    ///
+    /// ROUND 44, two ratified additions:
+    /// - **`Accepted` carries the seq** — the durable channel for
+    ///   external id ↔ seq mapping. The mapping lives in the
+    ///   embedder's store; telemetry never carries it (§3.6).
+    /// - **`parent` stamps causality** into the envelope's `ack`
+    ///   under the round-26/29 law (runtime-stamped, host-decided —
+    ///   the same field the snapshot `covers` machinery trusts).
+    ///   The parent must be a seq this context knows (any lineage)
+    ///   or the post is refused `invalid` — loud beats a silently
+    ///   unresolvable span downstream. This is how request/response
+    ///   across the external boundary closes causal loops: drain
+    ///   (seq out) → external work → inject (parent in).
+    pub fn post(
+        &mut self,
+        to: &Address,
+        letter: Letter,
+        authority: Vec<String>,
+        parent: Option<u64>,
+    ) -> Verdict {
         let mut letter = letter;
         letter.authority = authority;
         if letter.validate().is_err() || !payload_canonical(&letter.payload) {
+            self.refuse_injection(to, "invalid");
             return Verdict::Refused(RefuseReason::Invalid);
         }
+        if let Some(p) = parent {
+            if !jread(&self.journal).seq_exists(&self.name, p).unwrap_or(false) {
+                self.refuse_injection(to, "unknown parent seq");
+                return Verdict::Refused(RefuseReason::Invalid);
+            }
+        }
         let Some(idx) = self.resolve(to) else {
+            self.refuse_injection(to, "unknown-target");
             return Verdict::Refused(RefuseReason::UnknownTarget);
         };
         let to_actor = self.entries[idx].id.clone();
         let bound = self.entries[idx].bound;
         if jread(&self.journal).pending_count(&self.name, &to_actor).unwrap_or(0) >= bound {
+            self.refuse_injection(to, "busy");
             return Verdict::Refused(RefuseReason::Busy);
         }
-        let _ = jwrite(&self.journal).commit(
-            &self.name,
-            vec![JournalOp::Append(Pending {
-                letter,
-                from: Address::Instance(EXTERNAL.into()),
-                to_actor,
-                to: to.clone(),
-                ack: None,
-                producer: EXTERNAL.into(),
-            })],
-        );
-        Verdict::Accepted
+        let commit = jwrite(&self.journal)
+            .commit(
+                &self.name,
+                vec![JournalOp::Append(Pending {
+                    letter,
+                    from: Address::Instance(EXTERNAL.into()),
+                    to_actor,
+                    to: to.clone(),
+                    ack: parent,
+                    producer: EXTERNAL.into(),
+                })],
+            )
+            .expect("injection commit");
+        Verdict::Accepted { seq: commit.first_seq }
+    }
+
+    /// An injection refusal lands in telemetry (§3.6, stage
+    /// `injection`) — refusal-minting-is-policy, and the policy
+    /// events are runtime facts.
+    fn refuse_injection(&mut self, to: &Address, reason: &'static str) {
+        self.push_telemetry(TelemetryRecord {
+            kind: TelemetryKind::Refusal,
+            ts: self.clock.now_micros(),
+            actor: String::new(),
+            seq: 0,
+            payload: TelPayload::Refusal {
+                stage: "injection".into(),
+                reason: format!("{reason} ({to:?})"),
+            },
+        });
     }
 
     /// §7.6 restore scan: the latest `mwydyn.snapshot.save@1` letter
@@ -903,6 +1050,11 @@ impl Context {
             .set_ambient(parts);
         let fork = self.entries[idx].actor.as_ref().expect("live").fork();
 
+        // ROUND 44 — the dispatch wall stamp (§3.6): ts_in. The
+        // journal has commit times but NOT dispatch times, so the
+        // exchange record's duration can only come from here.
+        let ts_in = self.clock.now_micros();
+
         // Phase 1 — the pure transition (§3.5). The host face is
         // read-only; effects come back as data. A panic here is a
         // crash — supervision's problem (§3.2), not the message's.
@@ -938,7 +1090,7 @@ impl Context {
             Ok(effects) => effects,
             Err(_) => {
                 self.entries[idx].actor = Some(fork);
-                self.handle_crash(idx);
+                self.handle_crash(idx, &env, ts_in);
                 return true;
             }
         };
@@ -947,7 +1099,7 @@ impl Context {
         // replaces the mutated state — UNLESS the actor declared its
         // forks stateless (round 37): "just reused", the dirty
         // instance stays and the fork is dropped.
-        let kept = self.land_effects(idx, &env, effects);
+        let kept = self.land_effects(idx, &env, effects, ts_in);
         if !kept && self.entries[idx].actor.as_ref().expect("live").fork_carries_state() {
             self.entries[idx].actor = Some(fork);
         }
@@ -962,7 +1114,13 @@ impl Context {
     /// worker pool applies these in DISPATCH order — the journal's
     /// total order is dispatch order, so replay stays deterministic
     /// given the log (round 21's law).
-    fn land_effects(&mut self, idx: usize, env: &Envelope, effects: Vec<Effect>) -> bool {
+    fn land_effects(
+        &mut self,
+        idx: usize,
+        env: &Envelope,
+        effects: Vec<Effect>,
+        ts_in: i64,
+    ) -> bool {
         let actor_id = self.entries[idx].id.clone();
 
         // Phase 2 — validate ALL effects before committing ANY
@@ -1020,20 +1178,50 @@ impl Context {
                         break;
                     }
                 }
-                Effect::Emit { .. } => {}
+                // ROUND 44 (§3.6): actors declare `log`/`metric` only
+                // — the runtime kinds are the runtime's to mint, in
+                // either realm (compose parity with the barrier's
+                // declare gate). Attrs must be maps, like everywhere.
+                Effect::Emit { record } => {
+                    if !record.kind.actor_declared() {
+                        block = Some(Block::Strike("invalid telemetry kind in effects"));
+                        break;
+                    }
+                    let bad_attrs = |a: &Option<mwydyn_data::Value>| {
+                        matches!(a, Some(v) if !matches!(v, mwydyn_data::Value::Map(_)))
+                    };
+                    let bad = match &record.payload {
+                        TelPayload::Log { attrs, .. } => bad_attrs(attrs),
+                        TelPayload::Metric { attrs, .. } => bad_attrs(attrs),
+                        _ => true,
+                    };
+                    if bad {
+                        block = Some(Block::Strike("telemetry attrs must be a map"));
+                        break;
+                    }
+                }
             }
         }
 
         // Phase 3 — classify (§3.5's two refusal classes). On ANY
         // refusal, the state rolls back to the ack boundary, the
         // letter stays pending (Busy: no attempt burned) or burns an
-        // attempt (Strike: N strikes -> dead-letter).
+        // attempt (Strike: N strikes -> dead-letter). Either way the
+        // delivery attempt EARNS its exchange record (§3.6: busy
+        // included — late-because-busy is trace-relevant).
         match block {
             Some(Block::Busy) => {
-                self.telemetry.push((
-                    Level::Debug,
-                    format!("{actor_id}: target busy — state rolled back, no attempt burned"),
-                ));
+                if self.exchange_records {
+                    let r = self.exchange_record(
+                        env.seq,
+                        &actor_id,
+                        &env.from,
+                        env.ack,
+                        ts_in,
+                        Outcome::Busy,
+                    );
+                    self.push_telemetry(r);
+                }
                 return false;
             }
             Some(Block::Strike(why)) => {
@@ -1041,10 +1229,27 @@ impl Context {
                 let strikes = self.strikes.entry(key.clone()).or_insert(0);
                 *strikes += 1;
                 let n = *strikes;
-                self.telemetry.push((
-                    Level::Warn,
-                    format!("{actor_id}: effects refused ({why}) — attempt {n}"),
-                ));
+                if self.exchange_records {
+                    let r = self.exchange_record(
+                        env.seq,
+                        &actor_id,
+                        &env.from,
+                        env.ack,
+                        ts_in,
+                        Outcome::Struck,
+                    );
+                    self.push_telemetry(r);
+                }
+                self.push_telemetry(TelemetryRecord {
+                    kind: TelemetryKind::Refusal,
+                    ts: self.clock.now_micros(),
+                    actor: actor_id.clone(),
+                    seq: env.seq,
+                    payload: TelPayload::Refusal {
+                        stage: "effects".into(),
+                        reason: format!("{why} — attempt {n}"),
+                    },
+                });
                 if n >= MAX_ATTEMPTS {
                     let _ = jwrite(&self.journal).commit(
                         &self.name,
@@ -1061,6 +1266,16 @@ impl Context {
                     );
                     self.strikes.remove(&key);
                     self.dead_letters.push(env.clone());
+                    self.push_telemetry(TelemetryRecord {
+                        kind: TelemetryKind::Lifecycle,
+                        ts: self.clock.now_micros(),
+                        actor: actor_id.clone(),
+                        seq: env.seq,
+                        payload: TelPayload::Lifecycle {
+                            event: LifecycleEvent::DeadLettered,
+                            detail: Some(why.into()),
+                        },
+                    });
                 }
                 return false;
             }
@@ -1098,8 +1313,18 @@ impl Context {
                         object: object.clone(),
                     });
                 }
-                Effect::Emit { level, message } => {
-                    self.telemetry.push((*level, message.clone()));
+                // ROUND 44 (§3.6): telemetry is OUTSIDE the
+                // transaction, literally — emits apply here,
+                // best-effort, and a failed journal commit below
+                // does not retract them. The runtime STAMPS
+                // ts/actor/seq on apply (byzantine posture: actors
+                // never see a clock, and attribution is unforgeable).
+                Effect::Emit { record } => {
+                    let mut record = record.clone();
+                    record.ts = self.clock.now_micros();
+                    record.actor = actor_id.clone();
+                    record.seq = env.seq;
+                    self.push_telemetry(record);
                 }
             }
         }
@@ -1124,6 +1349,17 @@ impl Context {
             }
         }
         self.strikes.remove(&(actor_id.clone(), env.seq));
+        if self.exchange_records {
+            let r = self.exchange_record(
+                env.seq,
+                &actor_id,
+                &env.from,
+                env.ack,
+                ts_in,
+                Outcome::Committed,
+            );
+            self.push_telemetry(r);
+        }
         true
     }
 
@@ -1153,7 +1389,7 @@ impl Context {
         true
     }
 
-    fn handle_crash(&mut self, idx: usize) {
+    fn handle_crash(&mut self, idx: usize, env: &Envelope, ts_in: i64) {
         let id = self.entries[idx].id.clone();
         let supervision = self.entries[idx].supervision;
         // The front pending letter is the one that crashed us.
@@ -1161,11 +1397,44 @@ impl Context {
             .pending(&self.name, &id)
             .ok()
             .and_then(|p| p.first().map(|e| e.seq));
+        // ROUND 44 (§3.6): a crash IS a strike-burn (round 33:
+        // panic = strike) — the attempt earns its exchange record
+        // and its lifecycle fact, stamped with the crash site's own
+        // envelope (the front pending letter's sender rides `env`).
+        if self.exchange_records {
+            let r = self.exchange_record(
+                env.seq,
+                &id,
+                &env.from,
+                env.ack,
+                ts_in,
+                Outcome::Struck,
+            );
+            self.push_telemetry(r);
+        }
         match supervision {
             Supervision::FailFast => {
                 self.entries[idx].actor = None;
-                self.telemetry
-                    .push((Level::Error, format!("{id}: crashed — terminal (fail-fast)")));
+                self.push_telemetry(TelemetryRecord {
+                    kind: TelemetryKind::Lifecycle,
+                    ts: self.clock.now_micros(),
+                    actor: id.clone(),
+                    seq: env.seq,
+                    payload: TelPayload::Lifecycle {
+                        event: LifecycleEvent::Crashed,
+                        detail: Some("crashed — terminal (fail-fast)".into()),
+                    },
+                });
+                self.push_telemetry(TelemetryRecord {
+                    kind: TelemetryKind::Lifecycle,
+                    ts: self.clock.now_micros(),
+                    actor: id.clone(),
+                    seq: env.seq,
+                    payload: TelPayload::Lifecycle {
+                        event: LifecycleEvent::Terminal,
+                        detail: None,
+                    },
+                });
                 // Pending mail drains to dead letters on the next pass.
             }
             Supervision::Restart => {
@@ -1198,10 +1467,16 @@ impl Context {
                         *n
                     })
                     .unwrap_or(1);
-                self.telemetry.push((
-                    Level::Warn,
-                    format!("{id}: crashed — restarted fresh, attempt {attempts}"),
-                ));
+                self.push_telemetry(TelemetryRecord {
+                    kind: TelemetryKind::Lifecycle,
+                    ts: self.clock.now_micros(),
+                    actor: id.clone(),
+                    seq: env.seq,
+                    payload: TelPayload::Lifecycle {
+                        event: LifecycleEvent::Crashed,
+                        detail: Some(format!("restarted fresh, attempt {attempts}")),
+                    },
+                });
                 if let (Some(seq), true) = (front, attempts >= MAX_ATTEMPTS) {
                     let dead = jread(&self.journal)
                         .pending(&self.name, &id)
@@ -1224,6 +1499,16 @@ impl Context {
                     if let Some(env) = dead {
                         self.dead_letters.push(env);
                     }
+                    self.push_telemetry(TelemetryRecord {
+                        kind: TelemetryKind::Lifecycle,
+                        ts: self.clock.now_micros(),
+                        actor: id.clone(),
+                        seq,
+                        payload: TelPayload::Lifecycle {
+                            event: LifecycleEvent::DeadLettered,
+                            detail: Some("crash loop".into()),
+                        },
+                    });
                 }
             }
         }
@@ -1309,8 +1594,8 @@ impl Context {
         let correlation = format!("call-{}", self.counters);
         request.correlation = Some(correlation.clone());
         let handle = self.spawn_task(factory, &[])?;
-        let verdict = self.post(&Address::Instance(handle.id.clone()), request, Vec::new());
-        if verdict != Verdict::Accepted {
+        let verdict = self.post(&Address::Instance(handle.id.clone()), request, Vec::new(), None);
+        if !matches!(verdict, Verdict::Accepted { .. }) {
             return Ok(None);
         }
         self.run_until_idle(200);
@@ -1393,8 +1678,8 @@ impl Context {
             let mut fresh = fresh;
             fresh.set_ambient(parts);
             self.entries[idx].actor = Some(fresh);
-            let jguard = jread(&self.journal);
             {
+                let jguard = jread(&self.journal);
                 let Context {
                     name,
                     blobs,
@@ -1436,6 +1721,7 @@ impl Context {
                             .receive(&ctx, &host, &env.letter)
                     }))
                 };
+                drop(jguard); // telemetry minting below needs &mut self
                 // Effects are DISCARDED (they are already journaled);
                 // a panic during replay is skipped with a warning —
                 // the replayed state is approximate for that actor
@@ -1445,10 +1731,16 @@ impl Context {
                     Ok(_) => replays += 1,
                     Err(_) => {
                         replays += 1;
-                        self.telemetry.push((
-                            Level::Warn,
-                            format!("{id}: replay panicked at seq {} — skipped", env.seq),
-                        ));
+                        self.push_telemetry(TelemetryRecord {
+                            kind: TelemetryKind::Refusal,
+                            ts: self.clock.now_micros(),
+                            actor: id.clone(),
+                            seq: env.seq,
+                            payload: TelPayload::Refusal {
+                                stage: "hydrate".into(),
+                                reason: format!("replay panicked at seq {} — skipped", env.seq),
+                            },
+                        });
                     }
                 }
             }
@@ -1475,6 +1767,20 @@ impl Context {
     /// verification).
     pub fn workers(&mut self, n: usize) -> &mut Self {
         self.workers = n;
+        self
+    }
+
+    /// ROUND 44 — the telemetry ring's capacity (§3.6): the storm
+    /// valve. Lossiness lives at the ring, never at emission.
+    pub fn telemetry_capacity(&mut self, n: usize) -> &mut Self {
+        self.telemetry_cap = n.max(1);
+        self
+    }
+
+    /// ROUND 44 — mint `exchange` records (the span skeleton, §3.6)?
+    /// Default ON; throughput runs switch it off.
+    pub fn exchange_records(&mut self, on: bool) -> &mut Self {
+        self.exchange_records = on;
         self
     }
 
@@ -1578,6 +1884,7 @@ impl Context {
                     outcome: outcome.map_err(|_| ()),
                     actor,
                     rollback,
+                    now,
                 });
             }));
         }
@@ -1677,7 +1984,7 @@ impl Context {
                         .dispatched_envs
                         .remove(&idx)
                         .expect("staged envelope present");
-                    let WaveOutcome { seq: _, outcome, actor, rollback } = r;
+                    let WaveOutcome { seq: _, outcome, actor, rollback, now } = r;
                     // ROUND 37: the actor's declaration decides the
                     // refusal semantics — stateful forks restore the
                     // pre-receive copy; stateless ones keep the
@@ -1685,7 +1992,7 @@ impl Context {
                     let carries = actor.as_ref().fork_carries_state();
                     match outcome {
                         Ok(effects) => {
-                            let kept = self.land_effects(idx, &env, effects);
+                            let kept = self.land_effects(idx, &env, effects, now);
                             if kept || !carries {
                                 // Mutation kept — or declared
                                 // stateless: the dirty instance stays
@@ -1703,7 +2010,7 @@ impl Context {
                             // decides (restart/fail-fast) — the serial
                             // path's exact semantics.
                             self.entries[idx].actor = Some(rollback);
-                            self.handle_crash(idx);
+                            self.handle_crash(idx, &env, now);
                         }
                     }
                 }
