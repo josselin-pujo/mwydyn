@@ -1,0 +1,249 @@
+{
+  "cases": [
+    {
+      "canonical_hex": "a263726566d903eaa36473697a651366646967657374784032396235373838633866663235646561373837636334666333663061653661383437333234313539386332366564343764373364613936623637376162346533696d65646961547970656a746578742f706c61696e647665726268626c6f622e676574",
+      "fields": {
+        "ref": {
+          "$ref": {
+            "digest": "29b5788c8ff25dea787cc4fc3f0ae6a8473241598c26ed47d73da96b677ab4e3",
+            "mediaType": "text/plain",
+            "size": 19
+          }
+        },
+        "verb": "blob.get"
+      },
+      "kind": "request",
+      "name": "request-blob-get"
+    },
+    {
+      "canonical_hex": "a263726566d903eaa36473697a651366646967657374784032396235373838633866663235646561373837636334666333663061653661383437333234313539386332366564343764373364613936623637376162346533696d65646961547970656a746578742f706c61696e647665726268626c6f622e6c656e",
+      "fields": {
+        "ref": {
+          "$ref": {
+            "digest": "29b5788c8ff25dea787cc4fc3f0ae6a8473241598c26ed47d73da96b677ab4e3",
+            "mediaType": "text/plain",
+            "size": 19
+          }
+        },
+        "verb": "blob.len"
+      },
+      "kind": "request",
+      "name": "request-blob-len"
+    },
+    {
+      "canonical_hex": "a46374746cf6647665726268626c6f622e70757465627974657353616d6269656e742d766563746f722d626f6479696d65646961547970656a746578742f706c61696e",
+      "fields": {
+        "bytes": {
+          "$hex": "616d6269656e742d766563746f722d626f6479"
+        },
+        "mediaType": "text/plain",
+        "ttl": null,
+        "verb": "blob.put"
+      },
+      "kind": "request",
+      "name": "request-blob-put-no-ttl"
+    },
+    {
+      "canonical_hex": "a46374746c1ad693a400647665726268626c6f622e70757465627974657353616d6269656e742d766563746f722d626f6479696d65646961547970656a746578742f706c61696e",
+      "fields": {
+        "bytes": {
+          "$hex": "616d6269656e742d766563746f722d626f6479"
+        },
+        "mediaType": "text/plain",
+        "ttl": 3600000000,
+        "verb": "blob.put"
+      },
+      "kind": "request",
+      "name": "request-blob-put-ttl"
+    },
+    {
+      "canonical_hex": "a164766572626463617073",
+      "fields": {
+        "verb": "caps"
+      },
+      "kind": "request",
+      "name": "request-caps"
+    },
+    {
+      "canonical_hex": "a263726566d903eaa36473697a651366646967657374784032396235373838633866663235646561373837636334666333663061653661383437333234313539386332366564343764373364613936623637376162346533696d65646961547970656a746578742f706c61696e64766572626a626c6f622e7374617473",
+      "expect_error": "UnsupportedVerb",
+      "expect_verb_name": "blob.stats",
+      "fields": {
+        "ref": {
+          "$ref": {
+            "digest": "29b5788c8ff25dea787cc4fc3f0ae6a8473241598c26ed47d73da96b677ab4e3",
+            "mediaType": "text/plain",
+            "size": 19
+          }
+        },
+        "verb": "blob.stats"
+      },
+      "kind": "request",
+      "name": "request-unknown-verb"
+    },
+    {
+      "canonical_hex": "a1647665726268626c6f622e676574",
+      "expect_error": "BadVerbField",
+      "fields": {
+        "verb": "blob.get"
+      },
+      "kind": "request",
+      "name": "request-get-ref-missing"
+    },
+    {
+      "canonical_hex": "a263726566696e6f742d612d726566647665726268626c6f622e676574",
+      "expect_error": "BadVerbField",
+      "fields": {
+        "ref": "not-a-ref",
+        "verb": "blob.get"
+      },
+      "kind": "request",
+      "name": "request-get-ref-not-blobref"
+    },
+    {
+      "canonical_hex": "a46374746cf6647665726268626c6f622e7075746562797465736474657874696d65646961547970656a746578742f706c61696e",
+      "expect_error": "BadVerbField",
+      "fields": {
+        "bytes": "text",
+        "mediaType": "text/plain",
+        "ttl": null,
+        "verb": "blob.put"
+      },
+      "kind": "request",
+      "name": "request-put-bytes-not-bytes"
+    },
+    {
+      "canonical_hex": "a46374746cf6647665726268626c6f622e70757465627974657353616d6269656e742d766563746f722d626f6479696d656469615479706507",
+      "expect_error": "BadVerbField",
+      "fields": {
+        "bytes": {
+          "$hex": "616d6269656e742d766563746f722d626f6479"
+        },
+        "mediaType": 7,
+        "ttl": null,
+        "verb": "blob.put"
+      },
+      "kind": "request",
+      "name": "request-put-mediatype-not-text"
+    },
+    {
+      "canonical_hex": "a46374746c64736f6f6e647665726268626c6f622e70757465627974657353616d6269656e742d766563746f722d626f6479696d65646961547970656a746578742f706c61696e",
+      "expect_error": "BadVerbField",
+      "fields": {
+        "bytes": {
+          "$hex": "616d6269656e742d766563746f722d626f6479"
+        },
+        "mediaType": "text/plain",
+        "ttl": "soon",
+        "verb": "blob.put"
+      },
+      "kind": "request",
+      "name": "request-put-ttl-not-int"
+    },
+    {
+      "canonical_hex": "a46374746c20647665726268626c6f622e70757465627974657353616d6269656e742d766563746f722d626f6479696d65646961547970656a746578742f706c61696e",
+      "expect_error": "BadVerbField",
+      "fields": {
+        "bytes": {
+          "$hex": "616d6269656e742d766563746f722d626f6479"
+        },
+        "mediaType": "text/plain",
+        "ttl": -1,
+        "verb": "blob.put"
+      },
+      "kind": "request",
+      "name": "request-put-ttl-negative"
+    },
+    {
+      "canonical_hex": "820102",
+      "expect_error": "BadForm",
+      "fields": [
+        1,
+        2
+      ],
+      "kind": "request",
+      "name": "request-not-a-map"
+    },
+    {
+      "canonical_hex": "a1647665726203",
+      "expect_error": "BadForm",
+      "fields": {
+        "verb": 3
+      },
+      "kind": "request",
+      "name": "request-verb-not-text"
+    },
+    {
+      "canonical_hex": "ff00",
+      "expect_error": "Decode",
+      "kind": "request",
+      "name": "request-garbage-bytes"
+    },
+    {
+      "canonical_hex": "a1626f6bd903eaa36473697a651366646967657374784032396235373838633866663235646561373837636334666333663061653661383437333234313539386332366564343764373364613936623637376162346533696d65646961547970656a746578742f706c61696e",
+      "kind": "response",
+      "name": "response-ok-put-ref",
+      "ok": {
+        "$ref": {
+          "digest": "29b5788c8ff25dea787cc4fc3f0ae6a8473241598c26ed47d73da96b677ab4e3",
+          "mediaType": "text/plain",
+          "size": 19
+        }
+      }
+    },
+    {
+      "canonical_hex": "a1626f6b53616d6269656e742d766563746f722d626f6479",
+      "kind": "response",
+      "name": "response-ok-get-bytes",
+      "ok": {
+        "$hex": "616d6269656e742d766563746f722d626f6479"
+      }
+    },
+    {
+      "canonical_hex": "a1626f6b13",
+      "kind": "response",
+      "name": "response-ok-len-int",
+      "ok": 19
+    },
+    {
+      "canonical_hex": "a1626f6b82a2647665726269626c6f622e72656164666f626a656374612aa264766572626a626c6f622e7772697465666f626a656374612a",
+      "kind": "response",
+      "name": "response-ok-caps-rows",
+      "ok": [
+        {
+          "object": "*",
+          "verb": "blob.read"
+        },
+        {
+          "object": "*",
+          "verb": "blob.write"
+        }
+      ]
+    },
+    {
+      "canonical_hex": "a1636572726c556e617574686f72697a6564",
+      "err": "Unauthorized",
+      "kind": "response",
+      "name": "response-err-unauthorized"
+    },
+    {
+      "canonical_hex": "a163657272674d697373696e67",
+      "err": "Missing",
+      "kind": "response",
+      "name": "response-err-missing"
+    },
+    {
+      "canonical_hex": "a16365727269496e74656772697479",
+      "err": "Integrity",
+      "kind": "response",
+      "name": "response-err-integrity"
+    },
+    {
+      "canonical_hex": "a1636572726b556e617661696c61626c65",
+      "err": "Unavailable",
+      "kind": "response",
+      "name": "response-err-unavailable"
+    }
+  ],
+  "profile": "ambient-v0"
+}

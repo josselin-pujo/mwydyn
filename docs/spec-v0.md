@@ -671,7 +671,10 @@ Verbs mirror the native host face with the same cap checks:
 `blob.get`/`blob.len` (blob.read), `blob.put` (blob.write), `caps`
 (free). No clock verb — the ticker is the only wall-clock reader
 (§6). Powers are granted per-actor (capability rows), never
-ambient; refusals are observed by name.
+ambient; refusals are observed by name. **Conformance vectors:
+`ambient-v0`** (round 42) — the four canonical request forms, the
+refusal table with the offending verb named, and the response
+envelope forms with every dispatch refusal's exact spelling.
 
 ### 9.5 Reply routing [DECIDED, round 41]
 

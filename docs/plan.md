@@ -83,7 +83,11 @@
   §9.2 — `from_compiled_stateful` removed); counter/store migrate
   onto the SDK as living examples, minimal stays the byzantine
   fixture; new stateful-ephemeral example; docs-as-product (the
-  crate doc is the guide).
+  crate doc is the guide). **ambient-v0 vectors LANDED (round 42):**
+  the §9.4 contract as data — canonical verb forms, refusal table,
+  response envelope spellings (generator + harness, barrier-v0's
+  pattern). Remaining: mwydyn-stdlib (the merge actor); guest SDKs
+  beyond Rust.
 - **M4 — the A1 corpus, conformance-green.** `cbor-v1.json` et al.
   pass in `mwydyn-vectors`; every DECIDED spec section has vectors;
   spec v0 declared complete.

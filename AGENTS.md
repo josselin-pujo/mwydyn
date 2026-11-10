@@ -167,6 +167,24 @@ drains through the FACE, durability face silent, plain hot silent —
 the round-34 no-op regression gate) + barrier-v0 (canonical
 request/response forms machine-generated + refusal table — any
 second-realm decoder consumes it).
+**ROUND 42: ambient-v0 CONFORMANCE VECTORS** (work-notes/42; spec
+§9.4 cites the corpus): the ambient-import contract AS DATA, the
+barrier-v0 pattern applied verbatim — machine generator
+(`gen-ambient-v0`), committed corpus (23 cases), harness
+(`mwydyn-vectors/tests/ambient.rs`). Pins: the FOUR canonical
+request forms (blob.get/len with a REAL machine digest, blob.put
+ttl-null + ttl-int, caps); the REFUSAL TABLE (unknown verb BY NAME,
+ref missing/not-a-ref, bytes/mediaType/ttl wrong types, negative
+ttl, non-map, verb-not-text, garbage); the RESPONSE ENVELOPE FORMS
+— ok per result shape + `{"err"}` with every dispatch refusal's
+EXACT SPELLING (Unauthorized/Missing/Integrity/Unavailable — a
+drifting second-realm SDK fails the corpus). INVARIANT: every case
+pins its canonical hex — malformed SHAPES are canonical bytes too
+(ONE desugar, generator-side, for $hex/$ref). Corpus refs are
+VALIDATED, never trusted (the runner's model law). Out of scope,
+recorded: the -1 retry protocol (linear-memory mechanics) and SDK
+reader diagnostics (SDK host tests pin them). 32 suites / 72
+tests, clippy clean.
 **ROUND 41: THE RUST GUEST SDK — THE GUEST DECLARES, THE RUNTIME
 OBEYS** (work-notes/41; spec §9.6): `mwydyn-guest` is the
 author-facing crate — one dependency, one trait, one entry line.
@@ -282,7 +300,8 @@ composition declarative at open, replay of DELIVERED letters
 (1..=cursor) with effects discarded + clock pinned to journaled
 commit times + Mint facts rebuilt into rows — idempotent via
 base_rows reset; durable-context test proves work→die→reopen→keep
-working with exactly-once delivery. **Next:** ambient conformance vectors
-(ambient-v0); mwydyn-stdlib (the merge actor); epoch/fuel budgets
-armed per exchange (the executor round); the JS guest SDK on
-QuickJS-ng (the next language over the same three words).
+working with exactly-once delivery. **Next:** mwydyn-stdlib (the
+merge actor); epoch/fuel budgets armed per exchange (the executor
+round); guest SDKs beyond Rust — JS on QuickJS-ng agreed as the
+next language, a PyO3 (Python) embedding under discussion (round
+43's fork).
