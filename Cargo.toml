@@ -11,6 +11,7 @@ members = [
     "crates/mwydyn-guest",
     "crates/mwydyn-guest-store",
     "crates/mwydyn-guest-dedup",
+    "crates/mwydyn-guest-js",
 ]
 
 [workspace.package]

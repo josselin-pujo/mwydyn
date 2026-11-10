@@ -300,8 +300,11 @@ composition declarative at open, replay of DELIVERED letters
 (1..=cursor) with effects discarded + clock pinned to journaled
 commit times + Mint facts rebuilt into rows — idempotent via
 base_rows reset; durable-context test proves work→die→reopen→keep
-working with exactly-once delivery. **Next:** mwydyn-stdlib (the
-merge actor); epoch/fuel budgets armed per exchange (the executor
-round); guest SDKs beyond Rust — JS on QuickJS-ng agreed as the
-next language, a PyO3 (Python) embedding under discussion (round
-43's fork).
+working with exactly-once delivery. **Next:** ROUND 43 IN FLIGHT — the JS/TS guest SDK on QuickJS-ng
+(work-notes/43; ENGINE MILESTONE LANDED: freestanding quickjs-ng
+v0.18.0 evaluates under wasmtime on the Rust heap — see the note's
+lessons: the NUL wall, C11 tag scope, the realloc header poison);
+remaining: wrapper/conversion/prelude, build tool, TS package;
+after it: the PyO3 host-side embedding
+(owner-ratified role; stateless-only v0 default); mwydyn-stdlib
+(the merge actor); epoch/fuel budgets armed per exchange.

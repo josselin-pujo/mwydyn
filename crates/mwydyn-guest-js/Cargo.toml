@@ -1,0 +1,29 @@
+[package]
+name = "mwydyn-guest-js"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# THE JS/TS GUEST ENGINE WRAPPER (round 43, work-notes/43):
+# quickjs-ng vendored + built by build.rs (clang, both targets),
+# booted lazily, fed the prelude + script slot, declaring the §9
+# exports via the round-41 SDK macros. cdylib = the wasm artifact
+# engine; rlib = host-side SDK tests at native speed.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mwydyn-guest = { path = "../mwydyn-guest" }
+mwydyn-data = { path = "../mwydyn-data" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# pure-Rust libm — wasm lacks pow/log2/fmod instructions and the
+# intrinsics lower to calls of the very symbols we define (see
+# src/alloc.rs); libm breaks the recursion. MIT OR Apache-2.0.
+libm = "0.2"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+wasmtime = "26"

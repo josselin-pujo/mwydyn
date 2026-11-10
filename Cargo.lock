@@ -733,6 +733,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mwydyn-guest-js"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libm",
+ "mwydyn-data",
+ "mwydyn-guest",
+ "wasmtime",
+]
+
+[[package]]
 name = "mwydyn-guest-minimal"
 version = "0.1.0"
 dependencies = [
