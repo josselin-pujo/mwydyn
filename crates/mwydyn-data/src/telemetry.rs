@@ -466,6 +466,35 @@ impl TelemetryRecord {
         Ok(TelemetryRecord { kind, ts: *ts, actor: actor.clone(), seq: *seq as u64, payload })
     }
 
+    /// The GUEST-DECLARE form of an actor-declared record — kind +
+    /// payload ONLY (what a guest returns in a barrier response;
+    /// `to_value`'s minted fields never ride the declare form).
+    /// Runtime kinds are refused: callers gate on
+    /// [`TelemetryKind::actor_declared`].
+    pub fn declare_value(&self) -> Value {
+        debug_assert!(
+            self.kind.actor_declared(),
+            "declare forms exist for log/metric only"
+        );
+        let full = self.to_value();
+        let Value::Map(pairs) = &full else {
+            unreachable!("to_value builds a map");
+        };
+        let kind_s = self.kind.as_str();
+        Value::map(vec![
+            ("kind".into(), Value::Text(kind_s.into())),
+            (
+                kind_s.into(),
+                pairs
+                    .iter()
+                    .find(|(k, _)| k == kind_s)
+                    .map(|(_, v)| v.clone())
+                    .expect("to_value carries the payload key"),
+            ),
+        ])
+        .expect("fixed hygienic keys")
+    }
+
     /// Decode the GUEST-DECLARE form — kind + payload only, no
     /// minted fields (their presence is refused: byzantine posture),
     /// and only actor-declarable kinds (`log` | `metric`) — the

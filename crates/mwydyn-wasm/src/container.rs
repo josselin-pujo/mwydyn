@@ -371,6 +371,10 @@ impl WasmActor {
             .into_iter()
             .map(|e| match e {
                 BarrierEffect::Post { to, letter } => Effect::Post { to, letter },
+                // ROUND 44: the guest's declare-form record rides
+                // UNSTAMPED — the core mints ts/actor/seq at apply
+                // (§3.6 byzantine posture holds at this boundary).
+                BarrierEffect::Emit { record } => Effect::Emit { record },
             })
             .collect()
     }

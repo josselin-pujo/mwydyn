@@ -212,12 +212,14 @@ fn verb_value(verb: AmbientVerb) -> Value {
 
 /// One declared effect. Writing is declaring: return effects, the
 /// host validates the whole list, then applies it atomically.
-///
-/// `mint`/`emit` join this enum when the barrier grows them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// Deliver a letter to an address.
     Post { to: Address, letter: Letter },
+    /// Best-effort telemetry (§3.6, round 44): `log` and `metric`
+    /// records, built via the helpers. The wire form is the DECLARE
+    /// form — kind + payload only; the runtime stamps ts/actor/seq.
+    Emit { record: mwydyn_data::telemetry::TelemetryRecord },
 }
 
 impl Effect {
@@ -229,6 +231,82 @@ impl Effect {
             to,
             letter: Letter::new(kind, payload, None, None, vec![])?,
         })
+    }
+
+    /// A log record (§3.6) — best-effort, lossy by design, never
+    /// backpressures your business posts.
+    pub fn log(level: mwydyn_data::telemetry::Level, message: impl Into<String>) -> Effect {
+        Effect::Emit {
+            record: mwydyn_data::telemetry::TelemetryRecord::declared(
+                mwydyn_data::telemetry::TelemetryKind::Log,
+                mwydyn_data::telemetry::TelPayload::Log {
+                    level,
+                    message: message.into(),
+                    attrs: None,
+                },
+            ),
+        }
+    }
+
+    /// A log record with attributes (a canonical map).
+    pub fn log_with(
+        level: mwydyn_data::telemetry::Level,
+        message: impl Into<String>,
+        attrs: Value,
+    ) -> Effect {
+        Effect::Emit {
+            record: mwydyn_data::telemetry::TelemetryRecord::declared(
+                mwydyn_data::telemetry::TelemetryKind::Log,
+                mwydyn_data::telemetry::TelPayload::Log {
+                    level,
+                    message: message.into(),
+                    attrs: Some(attrs),
+                },
+            ),
+        }
+    }
+
+    /// A metric observation (§3.6): points-not-aggregates, delta
+    /// temporality — the sink aggregates.
+    pub fn metric(
+        name: impl Into<String>,
+        instrument: mwydyn_data::telemetry::Instrument,
+        value: f64,
+    ) -> Effect {
+        Effect::Emit {
+            record: mwydyn_data::telemetry::TelemetryRecord::declared(
+                mwydyn_data::telemetry::TelemetryKind::Metric,
+                mwydyn_data::telemetry::TelPayload::Metric {
+                    name: name.into(),
+                    instrument,
+                    value,
+                    unit: None,
+                    attrs: None,
+                },
+            ),
+        }
+    }
+
+    /// A metric observation with unit and/or attributes.
+    pub fn metric_with(
+        name: impl Into<String>,
+        instrument: mwydyn_data::telemetry::Instrument,
+        value: f64,
+        unit: Option<&str>,
+        attrs: Option<Value>,
+    ) -> Effect {
+        Effect::Emit {
+            record: mwydyn_data::telemetry::TelemetryRecord::declared(
+                mwydyn_data::telemetry::TelemetryKind::Metric,
+                mwydyn_data::telemetry::TelPayload::Metric {
+                    name: name.into(),
+                    instrument,
+                    value,
+                    unit: unit.map(str::to_string),
+                    attrs,
+                },
+            ),
+        }
     }
 
     /// Reply to the SENDER (`cx.sender()`), carrying the incoming
@@ -274,6 +352,7 @@ impl Effect {
                 letter: letter.clone(),
             }
             .to_value(),
+            Effect::Emit { record } => BarrierEffect::Emit { record: record.clone() }.to_value(),
         }
     }
 }

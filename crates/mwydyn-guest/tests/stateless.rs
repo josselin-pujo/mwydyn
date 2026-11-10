@@ -75,6 +75,7 @@ fn reply_conventions_both_paths() {
             assert_eq!(letter.correlation.as_deref(), Some("ex-2"));
             assert_eq!(letter.kind, "test.echo@1");
         }
+        BarrierEffect::Emit { .. } => panic!("expected a post"),
     }
 
     // unrouted: the sender is the return address
@@ -88,6 +89,7 @@ fn reply_conventions_both_paths() {
             assert_eq!(*to, sender(), "no replyTo → sender");
             assert_eq!(letter.correlation.as_deref(), Some("ex-3"));
         }
+        BarrierEffect::Emit { .. } => panic!("expected a post"),
     }
 }
 

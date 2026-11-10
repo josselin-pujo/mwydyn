@@ -41,8 +41,9 @@ pub enum BarrierError {
     BadVersion(i64),
     /// The embedded letter failed structural validation.
     BadLetter(EnvelopeError),
-    /// Response named a verb the host does not implement (`post` is
-    /// the only verb today; `mint`/`emit` arrive with their effects).
+    /// Response named a verb the host does not implement (`post` +
+    /// `emit` since round 44; `mint` arrives with its effect; a
+    /// runtime-only telemetry kind reads as `emit:<kind>`).
     UnsupportedVerb(String),
 }
 
@@ -87,12 +88,15 @@ impl BarrierRequest {
     }
 }
 
-/// Guest → host: one declared effect. `post` is the only verb the
-/// barrier carries today; `mint`/`emit` join when their effects do,
-/// as additional single-entry maps in the same array.
+/// Guest → host: one declared effect. `post` since round 33, `emit`
+/// since round 44 (§3.6) — telemetry crosses the barrier as the
+/// GUEST-DECLARE form: kind + payload only, log|metric only. The
+/// runtime kinds are refused by name (`emit:exchange` & co. — the
+/// stable error vectors pin); minted fields never ride at all.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BarrierEffect {
     Post { to: Address, letter: Letter },
+    Emit { record: crate::telemetry::TelemetryRecord },
 }
 
 impl BarrierEffect {
@@ -105,6 +109,11 @@ impl BarrierEffect {
                     ("to".into(), address_to_value(to)),
                 ])
                 .expect("fixed hygienic keys"),
+            )])
+            .expect("fixed hygienic keys"),
+            BarrierEffect::Emit { record } => Value::map(vec![(
+                "emit".into(),
+                record.declare_value(),
             )])
             .expect("fixed hygienic keys"),
         }
@@ -139,6 +148,21 @@ impl BarrierEffect {
                         .map_err(BarrierError::BadLetter)?;
                     effects.push(BarrierEffect::Post { to, letter });
                 }
+                "emit" => match crate::telemetry::TelemetryRecord::declare_from_value(body) {
+                    Ok(record) => effects.push(BarrierEffect::Emit { record }),
+                    // Name-bearing refusals, spellings pinned by
+                    // telemetry-v0: a runtime kind or an unknown kind
+                    // is an unimplemented verb (`emit:exchange`), not
+                    // a decode accident.
+                    Err(crate::telemetry::TelemetryError::RuntimeKind(k))
+                    | Err(crate::telemetry::TelemetryError::UnknownKind(k)) => {
+                        return Err(BarrierError::UnsupportedVerb(format!("emit:{k}")))
+                    }
+                    Err(crate::telemetry::TelemetryError::BadForm(m)) => {
+                        return Err(BarrierError::BadForm(m))
+                    }
+                    Err(crate::telemetry::TelemetryError::Decode(_)) => return Err(E),
+                },
                 other => return Err(BarrierError::UnsupportedVerb(other.to_string())),
             }
         }
@@ -240,6 +264,79 @@ mod tests {
         // a byzantine guest handing back garbage must not decode
         let garbage = [0xFF, 0x00, 0x01];
         assert!(decode(&garbage, &DecodeOptions::default()).is_err());
+    }
+
+    /// ROUND 44: the emit verb — declare-form roundtrip, runtime
+    /// kinds refused BY NAME, minted fields refused outright.
+    #[test]
+    fn emit_verb_roundtrips_and_refuses_runtime_kinds() {
+        use crate::telemetry::{Level, TelPayload, TelemetryKind, TelemetryRecord};
+        let record = TelemetryRecord::declared(
+            TelemetryKind::Log,
+            TelPayload::Log {
+                level: Level::Warn,
+                message: "queue depth odd".into(),
+                attrs: None,
+            },
+        );
+        let effects = vec![BarrierEffect::Emit { record }];
+        let v = Value::Array(effects.iter().map(|e| e.to_value()).collect());
+        // The wire form carries NO minted fields.
+        let bytes = encode(&v);
+        assert!(!bytes.is_empty());
+        let back = BarrierEffect::effects_from_value(
+            &decode(&bytes, &DecodeOptions::default()).expect("canonical"),
+        )
+        .expect("roundtrip");
+        assert_eq!(effects, back);
+
+        // A runtime kind is refused by name — spellings pinned by
+        // telemetry-v0.
+        let forged = Value::Array(vec![Value::map(vec![(
+            "emit".into(),
+            Value::map(vec![
+                ("kind".into(), Value::Text("exchange".into())),
+                (
+                    "exchange".into(),
+                    Value::map(vec![
+                        ("from".into(), Value::Text("x".into())),
+                        ("outcome".into(), Value::Text("committed".into())),
+                        ("ts_in".into(), Value::Int(0)),
+                    ])
+                    .unwrap(),
+                ),
+            ])
+            .unwrap(),
+        )])
+        .unwrap()]);
+        assert!(matches!(
+            BarrierEffect::effects_from_value(&forged),
+            Err(BarrierError::UnsupportedVerb(ref s)) if s == "emit:exchange"
+        ));
+
+        // Minted fields riding the declare form: refused (byzantine
+        // posture — attribution is the runtime's to mint).
+        let riding = Value::Array(vec![Value::map(vec![(
+            "emit".into(),
+            Value::map(vec![
+                ("actor".into(), Value::Text("forged".into())),
+                ("kind".into(), Value::Text("log".into())),
+                (
+                    "log".into(),
+                    Value::map(vec![
+                        ("level".into(), Value::Text("info".into())),
+                        ("message".into(), Value::Text("hi".into())),
+                    ])
+                    .unwrap(),
+                ),
+            ])
+            .unwrap(),
+        )])
+        .unwrap()]);
+        assert!(matches!(
+            BarrierEffect::effects_from_value(&riding),
+            Err(BarrierError::BadForm(_))
+        ));
     }
 
     #[test]

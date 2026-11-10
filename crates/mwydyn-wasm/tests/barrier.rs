@@ -168,6 +168,109 @@ fn byzantine_guest_responses_are_crashes_not_swallows() {
     );
 }
 
+/// ROUND 44: the `emit` verb crosses the barrier as the DECLARE form
+/// (kind + payload only) and the CORE stamps ts/actor/seq at apply —
+/// a guest cannot forge attribution, and doesn't need to.
+#[test]
+fn guest_emit_crosses_the_barrier_stamped_by_the_core() {
+    let canned = BarrierEffect::Emit {
+        record: mwydyn_data::telemetry::TelemetryRecord::declared(
+            mwydyn_data::telemetry::TelemetryKind::Log,
+            TelPayload::Log {
+                level: mwydyn_data::telemetry::Level::Info,
+                message: "hello from the guest".into(),
+                attrs: None,
+            },
+        ),
+    };
+    let wat = fixed_response_guest(&canned);
+
+    let mut ctx = Context::new("em");
+    ctx.spawn(
+        Spawn::new(
+            Some("guest"),
+            Box::new(move || {
+                let engine = WasmEngine::new().expect("engine");
+                Box::new(WasmActor::from_wat(&engine, &wat).expect("guest instantiates"))
+            }),
+        )
+        .supervision(mwydyn_core::Supervision::Restart),
+    )
+    .unwrap();
+    let kick =
+        Letter::new("test.kick@1", encode(&Value::Text("go".into())), None, None, vec![]).unwrap();
+    assert!(matches!(
+        ctx.post(&addr("em", "guest"), kick, vec![], None),
+        mwydyn_core::Verdict::Accepted { .. }
+    ));
+    ctx.run_until_idle(50);
+
+    let drained = ctx.drain_telemetry();
+    let log = drained
+        .iter()
+        .find(|r| matches!(&r.payload, TelPayload::Log { message, .. } if message == "hello from the guest"))
+        .expect("the guest's emit landed");
+    assert_eq!(log.seq, 1, "stamped with the causing letter's seq");
+    assert!(
+        log.actor.starts_with("ins-"),
+        "attribution is the runtime's instance id: {}",
+        log.actor
+    );
+    // The exchange record mints alongside — the guest's exchange IS
+    // the span the log attaches to.
+    assert!(drained
+        .iter()
+        .any(|r| r.seq == 1 && matches!(&r.payload, TelPayload::Exchange { .. })));
+}
+
+/// ROUND 44 byzantine: a guest forging a RUNTIME kind (`lifecycle`)
+/// through the emit verb is refused by name at the wall — the
+/// container panics, supervision strikes, the poison letter
+/// dead-letters. Runtime facts are the runtime's to mint.
+#[test]
+fn forged_runtime_kind_emit_is_a_crash() {
+    let forged = Value::Array(vec![Value::map(vec![(
+        "emit".into(),
+        Value::map(vec![
+            (
+                "kind".into(),
+                Value::Text("lifecycle".into()),
+            ),
+            (
+                "lifecycle".into(),
+                Value::map(vec![("event".into(), Value::Text("spawned".into()))]).unwrap(),
+            ),
+        ])
+        .unwrap(),
+    )])
+    .unwrap()]);
+    let resp = encode(&forged);
+    let mut block = Vec::with_capacity(4 + resp.len());
+    block.extend_from_slice(&(resp.len() as u32).to_le_bytes());
+    block.extend_from_slice(&resp);
+    let escaped: String = block.iter().map(|b| format!("\\{b:02x}")).collect();
+    let wat = fixed_response_wat_from_block(&block, &escaped);
+
+    let mut ctx = Context::new("fk");
+    ctx.spawn(
+        Spawn::new(
+            Some("liar"),
+            Box::new(move || {
+                let engine = WasmEngine::new().expect("engine");
+                Box::new(WasmActor::from_wat(&engine, &wat).expect("guest instantiates"))
+            }),
+        )
+        .supervision(mwydyn_core::Supervision::Restart),
+    )
+    .unwrap();
+    let kick =
+        Letter::new("test.kick@1", encode(&Value::Text("go".into())), None, None, vec![]).unwrap();
+    ctx.post(&addr("fk", "liar"), kick, vec![], None);
+    ctx.run_until_idle(50);
+
+    assert_eq!(ctx.dead_letters().len(), 1, "the forged-kind letter dead-letters");
+}
+
 /// Same fixed-response WAT skeleton, but with an arbitrary (host
 /// provided) block as the canned response.
 fn fixed_response_wat_from_block(block: &[u8], escaped: &str) -> String {
