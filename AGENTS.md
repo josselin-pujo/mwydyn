@@ -339,6 +339,19 @@ proof (echo + the §3.6 telemetry log in the drain). KNOWN ISSUE:
 wrapper crashes at Rust opt-level >= 1 (pinned to 0; FFI UB hunt
 open — the note's lessons: NUL wall ×4, atom-direct conversion,
 allocation-free panic stash via exported global).
+**ROUND 45: THE PYTHON HOST EMBEDDING — THE INTEROP BENCH LIVES**
+(work-notes/45): `mwydyn-py` (pyo3 0.23, host-side peer crate) —
+the walking-test surface as a Python API (Context/spawn_python/
+spawn_wasm/post→Accepted{seq}/run/drain_external/drain_telemetry/
+snapshot_actor/dead_letters); Python actors are NATIVE-REALM
+(stateless v0 default, unratified), effects RETURNED (Effect.post/
+log/metric mirroring both SDKs), refusals raised as MwydynRefusal
+BY NAME, a raised exception IS a panic IS a strike; Value⇄Python
+with bignums riding Python ints. THE PROOF (owner's framing): one
+python-driven context, a PYTHON actor + the round-43 JS echo guest
+composing, ONE drain_telemetry showing logs from BOTH realms.
+Lesson: effect addresses resolve AT THE SHIM (AmbientParts context),
+never the builder. Tests: PYO3_PYTHON=C:/Python312/python.exe.
 **Next:** the PyO3 host-side embedding
 (owner-ratified role; stateless-only v0 default); mwydyn-stdlib
 (the merge actor); epoch/fuel budgets armed per exchange.

@@ -13,6 +13,7 @@ members = [
     "crates/mwydyn-guest-dedup",
     "crates/mwydyn-guest-js",
     "crates/mwydyn-js",
+    "crates/mwydyn-py",
 ]
 
 # round 43 (v0): the JS guest wrapper crashes under opt-level>=2

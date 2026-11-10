@@ -87,7 +87,9 @@
   the §9.4 contract as data — canonical verb forms, refusal table,
   response envelope spellings (generator + harness, barrier-v0's
   pattern). Remaining: mwydyn-stdlib (the merge actor); guest SDKs
-  beyond Rust.
+  beyond Rust. **JS SDK LANDED (round 43)**; **the Python host
+  embedding landed (round 45, mwydyn-py — the interop bench: python
+  actors + JS guests composing with one telemetry drain).**
 - **Telemetry outbox (round 44, spec §3.6 — LANDED 2026-11-10,
   three commits):** closed-kind
   records (`log | metric | exchange | lifecycle | refusal | drop`),

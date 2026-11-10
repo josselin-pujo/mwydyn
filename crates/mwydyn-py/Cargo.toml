@@ -1,0 +1,20 @@
+[package]
+name = "mwydyn-py"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# THE PYTHON HOST EMBEDDING (round 45, work-notes/45): mwydyn as a
+# Python library — scripted test harnesses now, python nodes when a
+# network transport exists. Host-side peer crate (pyo3 never touches
+# the core's graph). Python actors are native-realm: trusted,
+# GIL-serialized, compose-parity with wasm guests. Requires Python
+# 3.8+ installed (libpython links; tests embed an interpreter).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["auto-initialize"] }
+mwydyn-core = { path = "../mwydyn-core", features = ["sqlite"] }
+mwydyn-data = { path = "../mwydyn-data" }
+mwydyn-wasm = { path = "../mwydyn-wasm" }
