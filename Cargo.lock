@@ -507,6 +507,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
  "foldhash",
+ "serde",
 ]
 
 [[package]]
@@ -755,6 +756,16 @@ name = "mwydyn-guest-store"
 version = "0.1.0"
 dependencies = [
  "mwydyn-guest",
+]
+
+[[package]]
+name = "mwydyn-js"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "wasm-encoder 0.221.3",
+ "wasmparser 0.221.3",
+ "wasmtime",
 ]
 
 [[package]]
@@ -1337,6 +1348,16 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
+version = "0.221.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc8444fe4920de80a4fe5ab564fff2ae58b6b73166b89751f8c6c93509da32e5"
+dependencies = [
+ "leb128",
+ "wasmparser 0.221.3",
+]
+
+[[package]]
+name = "wasm-encoder"
 version = "0.263.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b883a26aea02eaabe2d2c3fba7eb039ef5cdcb5d5201ae5551e73d5e251a81f"
@@ -1354,6 +1375,19 @@ dependencies = [
  "ahash",
  "bitflags",
  "hashbrown 0.14.5",
+ "indexmap",
+ "semver",
+ "serde",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.221.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d06bfa36ab3ac2be0dee563380147a5b81ba10dd8885d7fbbc9eb574be67d185"
+dependencies = [
+ "bitflags",
+ "hashbrown 0.15.5",
  "indexmap",
  "semver",
  "serde",

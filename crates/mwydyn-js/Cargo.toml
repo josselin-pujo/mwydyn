@@ -1,0 +1,20 @@
+[package]
+name = "mwydyn-js"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# THE JS GUEST BUILD TOOL (round 43, work-notes/43 §2): compose the
+# prebuilt engine+wrapper wasm with a transpiled script into ONE
+# self-contained §9 artifact. Probes the script-slot address via one
+# throwaway wasmtime instantiation, then appends an active data
+# segment (wasm-encoder) — no fixed addresses, no host changes.
+[[bin]]
+name = "mwydyn-js"
+path = "src/main.rs"
+
+[dependencies]
+wasmtime = "26"
+wasm-encoder = "0.221"
+wasmparser = "0.221"
+anyhow = "1"

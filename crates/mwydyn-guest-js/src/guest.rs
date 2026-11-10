@@ -89,13 +89,12 @@ impl JsActor {
 /// Register the `__mwAmbient` intrinsic: JS object → CBOR → the §9.4
 /// import → back to JS (refusals ride `{__refused: code}`).
 unsafe extern "C" fn ambient_trampoline(
-    ctx: *mut std::ffi::c_void,
+    _ctx: *mut std::ffi::c_void,
     _this: JSValue,
     argc: i32,
     argv: *mut JSValue,
 ) -> JSValue {
     unsafe {
-        let _ = ctx;
         let actor = {
             let slot = &mut *std::ptr::addr_of_mut!(JS_ACTOR_SINGLETON);
             slot.as_mut().expect("engine live during ambient")
@@ -131,14 +130,16 @@ unsafe fn throw_js(e: &mut Engine, msg: &str) -> JSValue {
 
 fn register_ambient(e: &mut Engine) {
     unsafe {
-        let f = ffi::JS_NewCFunction(
+        let f = ffi::JS_NewCFunction2(
             e.ctx(),
             Some(ambient_trampoline),
-            b"__mwAmbient\0".as_ptr(),
+            c"__mwAmbient".as_ptr() as *const u8,
             1,
+            0, // JS_CFUNC_generic
+            0,
         );
         let global = ffi::JS_GetGlobalObject(e.ctx());
-        ffi::JS_SetPropertyStr(e.ctx(), global, b"__mwAmbient\0".as_ptr(), f);
+        ffi::JS_SetPropertyStr(e.ctx(), global, c"__mwAmbient".as_ptr() as *const u8, f);
         ffi::JS_FreeValue(e.ctx(), global);
     }
 }
@@ -221,8 +222,9 @@ fn convert_effects(e: &mut Engine, arr: JSValue) -> Vec<Effect> {
                 let record_v = js_to_value(e, emit).expect("emit record converts");
                 ffi::JS_FreeValue(ctx, emit);
                 ffi::JS_FreeValue(ctx, item);
-                let record = TelemetryRecord::declare_from_value(&record_v)
-                    .expect("emit: log/metric only (runtime kinds are struck)");
+                let record = TelemetryRecord::declare_from_value(&record_v).unwrap_or_else(|e| {
+                    panic!("emit declare failed ({e:?}) — the value as converted: {record_v:?}")
+                });
                 out.push(Effect::Emit { record });
                 continue;
             }
@@ -238,9 +240,13 @@ fn string_prop(e: &mut Engine, obj: JSValue, k: &str) -> String {
     opt_string_prop(e, obj, k).unwrap_or_default()
 }
 
+/// THE NUL WALL (again): property names cross as C strings — a Rust
+/// `&str` key without its terminator lands on adjacent bytes (found
+/// the hard way: `letter.kind` read back undefined).
 fn opt_string_prop(e: &mut Engine, obj: JSValue, k: &str) -> Option<String> {
+    let key = std::ffi::CString::new(k).expect("prop key without NUL");
     unsafe {
-        let v = ffi::JS_GetPropertyStr(e.ctx(), obj, k.as_ptr());
+        let v = ffi::JS_GetPropertyStr(e.ctx(), obj, key.as_ptr() as *const u8);
         let s = if v.tag() == ffi::JS_TAG_STRING {
             Some(e.js_to_string(v))
         } else {
@@ -275,23 +281,26 @@ impl Actor for JsActor {
             }
             ffi::JS_SetPropertyStr(ctx, lobj, b"authority\0".as_ptr(), auth);
 
-            // cx → JS
+            // cx → JS (kept alive through the call)
             let sender = mwydyn_data::address_to_value(cx.sender());
             let sender_js = value_to_js(e, &sender);
             let global = ffi::JS_GetGlobalObject(ctx);
-            let mwd = ffi::JS_GetPropertyStr(ctx, global, b"mwydyn\0".as_ptr());
-            let mkcx = ffi::JS_GetPropertyStr(ctx, mwd, b"__mkCx\0".as_ptr());
-            let mut argv = [sender_js];
-            let cx_obj = ffi::JS_Call(ctx, mkcx, mwd, 1, argv.as_mut_ptr());
-            ffi::JS_FreeValue(ctx, cx_obj);
+            let mwd = ffi::JS_GetPropertyStr(ctx, global, b"mwydyn ".as_ptr());
+            let mkcx = ffi::JS_GetPropertyStr(ctx, mwd, b"__mkCx ".as_ptr());
+            let mut cx_args = [sender_js];
+            let cx_obj = ffi::JS_Call(ctx, mkcx, mwd, 1, cx_args.as_mut_ptr());
 
-            // actor.receive(letter, cx)
-            let actor = ffi::JS_GetPropertyStr(ctx, mwd, b"__actor\0".as_ptr());
-            let recv = ffi::JS_GetPropertyStr(ctx, actor, b"receive\0".as_ptr());
+            // actor = mwydyn.__actor(); actor.receive(letter, cx)
+            let actor_fn = ffi::JS_GetPropertyStr(ctx, mwd, b"__actor ".as_ptr());
+            let mut no_args = [];
+            let actor = ffi::JS_Call(ctx, actor_fn, mwd, 0, no_args.as_mut_ptr());
+            ffi::JS_FreeValue(ctx, actor_fn);
+            let recv = ffi::JS_GetPropertyStr(ctx, actor, b"receive ".as_ptr());
             let mut args = [lobj, cx_obj];
             let result = ffi::JS_Call(ctx, recv, actor, 2, args.as_mut_ptr());
             ffi::JS_FreeValue(ctx, recv);
             ffi::JS_FreeValue(ctx, actor);
+            ffi::JS_FreeValue(ctx, cx_obj);
             ffi::JS_FreeValue(ctx, mkcx);
             ffi::JS_FreeValue(ctx, mwd);
             ffi::JS_FreeValue(ctx, global);
@@ -307,9 +316,10 @@ impl Actor for JsActor {
 }
 
 fn set_str_prop(e: &mut Engine, obj: JSValue, k: &str, s: &str) {
+    let key = std::ffi::CString::new(k).expect("prop key without NUL");
     unsafe {
         let v = ffi::JS_NewStringLen(e.ctx(), s.as_ptr(), s.len());
-        ffi::JS_SetPropertyStr(e.ctx(), obj, k.as_ptr() as *const u8, v);
+        ffi::JS_SetPropertyStr(e.ctx(), obj, key.as_ptr() as *const u8, v);
     }
 }
 
@@ -381,6 +391,7 @@ impl Durable for JsActor {
 /// script once (probe cost at composition, not per letter).
 #[no_mangle]
 pub extern "C" fn mwydyn_decl() -> u32 {
+    crate::mwjs_install_panic_hook();
     with_actor(|a| {
         a.boot();
         a.with_engine(|e| unsafe {
@@ -419,6 +430,7 @@ pub unsafe extern "C" fn dealloc(ptr: *mut u8, len: usize) {
 #[no_mangle]
 pub unsafe extern "C" fn process(req_ptr: *const u8, req_len: usize) -> *mut u8 {
     // the ambient trampoline reaches the actor through the singleton
+    crate::mwjs_install_panic_hook();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         barrier_exchange(req_ptr, req_len)
     })) {

@@ -39,19 +39,28 @@
       return { post: { to: addr(to), letter: mkLetter(kind, payload, null, letter.correlation) } };
     },
     // §3.6 telemetry — best-effort, lossy by design, never strikes
+    // the DECLARE form (§3.6): {"kind": K, K: {fields}} — payload
+    // nested under the kind key, never flat
     log(level, message, attrs) {
-      return { emit: { kind: "log", level: level, message: message, ...(attrs ? { attrs } : {}) } };
+      return {
+        emit: {
+          kind: "log",
+          log: { level: level, message: message, ...(attrs ? { attrs } : {}) },
+        },
+      };
     },
     metric(name, instrument, value, opts) {
       const o = opts || {};
       return {
         emit: {
           kind: "metric",
-          name: name,
-          instrument: instrument,
-          value: value,
-          ...(o.unit ? { unit: o.unit } : {}),
-          ...(o.attrs ? { attrs: o.attrs } : {}),
+          metric: {
+            name: name,
+            instrument: instrument,
+            value: value,
+            ...(o.unit ? { unit: o.unit } : {}),
+            ...(o.attrs ? { attrs: o.attrs } : {}),
+          },
         },
       };
     },

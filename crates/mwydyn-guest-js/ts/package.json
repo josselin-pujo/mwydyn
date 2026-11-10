@@ -1,0 +1,8 @@
+{
+  "name": "@mwydyn/guest",
+  "version": "0.1.0",
+  "description": "Types for mwydyn JS/TS guest plugins — the runtime is the artifact's injected prelude (types-only package: no runtime code, no version skew).",
+  "types": "index.d.ts",
+  "files": ["index.d.ts"],
+  "license": "Apache-2.0"
+}

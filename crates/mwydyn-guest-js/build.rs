@@ -50,6 +50,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", manifest.join("vendor").display());
     println!("cargo:rerun-if-changed={}", manifest.join("compat").display());
 
+    let is_wasm = target == "wasm32-unknown-unknown";
+
     let mut build = cc::Build::new();
     build
         .compiler(&clang)
@@ -64,13 +66,22 @@ fn main() {
         .opt_level(2)
         .warnings(false); // the engine's warnings are not ours to fix
 
-    let is_wasm = target == "wasm32-unknown-unknown";
     if is_wasm {
-        build
+        // SHIMS SEPARATE, AT -O0: clang's loop-idiom recognition
+        // rewrites the shim memcpy/memset byte LOOPS as calls to
+        // memcpy/memset — i.e. INTO THEMSELVES — at -O2 (the
+        // release-only boot crash, found the hard way). The engine
+        // TU keeps its optimization.
+        let mut shims = cc::Build::new();
+        shims
+            .compiler(&clang)
             .file(manifest.join("compat/shims.c"))
-            .include(manifest.join("compat/include"));
-        // cc targets wasm32-unknown-unknown with --target already;
-        // the engine must not assume any libc beyond compat/.
+            .include(manifest.join("compat/include"))
+            .define("QUICKJS_NG_BUILD", None)
+            .opt_level(0)
+            .warnings(false);
+        shims.compile("mwjs-shims");
+        build.include(manifest.join("compat/include"));
     } else {
         // Host: compile with clang against the default native
         // target — headers/CRT come from the platform (MSVC flavor
