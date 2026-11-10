@@ -496,7 +496,12 @@ ceremony without payoff.
   durability face silent; plain hot tier silent): the silent-no-op
   regression gate. barrier-v0 — canonical request/response forms
   (machine-generated hex) + the refusal table, consumable by any
-  second-realm decoder. The serial `run_until_idle` pump stays
+  second-realm decoder. **telemetry-v0 [round 44]** — the §3.6
+  record contract as data: full forms of all six kinds, the
+  guest-declare forms (log | metric only, unstamped), and the
+  refusal table (unknown kind by name, runtime kinds refused,
+  minted fields cannot ride the declare form). The serial
+  `run_until_idle` pump stays
   forever as the deterministic mode (tests, replay verification).
   Readiness bounds bought now: `JournalFace: Send+Sync` (external
   providers are threaded — one that cannot cross threads is not a

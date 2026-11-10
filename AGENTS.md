@@ -300,7 +300,36 @@ composition declarative at open, replay of DELIVERED letters
 (1..=cursor) with effects discarded + clock pinned to journaled
 commit times + Mint facts rebuilt into rows — idempotent via
 base_rows reset; durable-context test proves work→die→reopen→keep
-working with exactly-once delivery. **Next:** ROUND 43 IN FLIGHT — the JS/TS guest SDK on QuickJS-ng
+working with exactly-once delivery. **ROUND 44: THE TELEMETRY
+OUTBOX** (work-notes/44; spec §3.6, three commits, 37 suites):
+closed-kind records (`log | metric | exchange | lifecycle |
+refusal | drop`) in mwydyn-data — canonical CBOR, guest-declare
+form = log|metric ONLY with minted fields refused (byzantine
+posture at the telemetry boundary); `Effect::Emit { record }` +
+log/metric helpers (Level lives in mwydyn-data now); the shared
+BOUNDED RING (capacity knob, drop-oldest, per-kind drop ledger,
+`drain_telemetry()` leads lossy drains with a `drop` record —
+"never backpressures" is structural); ONE `exchange` RECORD PER
+DELIVERY ATTEMPT (committed|busy|struck; ack = parent span id —
+it already rode envelopes since round 26/29; ts_in/ts_out
+wall-stamped, durations exist ONLY core-side; flag default on);
+lifecycle + refusal records replace the stringly Vec<(Level,
+String)>; THE INJECTION HANDLE (§3.4): `post` returns
+`Accepted { seq }` + optional core-validated parent
+(`JournalRead::seq_exists` default impl) — external id↔seq
+mapping lives in the embedder's store, and request/response
+across the external boundary closes causal loops (drain seq out,
+inject parent in); UNGATED emission (floods = drop records,
+never strikes; forged runtime kinds struck at Phase 2 = compose
+parity with the barrier's `emit:<kind>` refusal). CROSS-CONTEXT
+CORRELATION RESOLVED (owner, same round): foreign systems echo
+ids by PAYLOAD convention (§9.5 precedent); mwydyn↔mwydyn = the
+BRIDGE pattern (the ratified handles ARE the mechanism; edge
+table with the bridge, join at the sink); envelope trace tokens
+DORMANT until cross-process transport exists. telemetry-v0
+corpus (19 cases) + generator + harness; OTel mapping = an
+out-of-core layer, out of scope permanently.
+**Next:** ROUND 43 IN FLIGHT — the JS/TS guest SDK on QuickJS-ng
 (work-notes/43; ENGINE MILESTONE LANDED: freestanding quickjs-ng
 v0.18.0 evaluates under wasmtime on the Rust heap — see the note's
 lessons: the NUL wall, C11 tag scope, the realloc header poison);

@@ -1,0 +1,280 @@
+{
+  "cases": [
+    {
+      "canonical_hex": "a56274731b00064b9fe68ac000636c6f67a3656174747273a167617474656d707402656c6576656c647761726e676d6573736167656f7175657565206465707468206f646463736571182a646b696e64636c6f67656163746f7265696e732d37",
+      "fields": {
+        "actor": "ins-7",
+        "kind": "log",
+        "log": {
+          "attrs": {
+            "attempt": 2
+          },
+          "level": "warn",
+          "message": "queue depth odd"
+        },
+        "seq": 42,
+        "ts": 1772000000000000
+      },
+      "kind": "record",
+      "name": "record-log-attrs"
+    },
+    {
+      "canonical_hex": "a56274731b00064b9fe68ac000636c6f67a2656c6576656c647761726e676d6573736167656f7175657565206465707468206f646463736571182a646b696e64636c6f67656163746f7265696e732d37",
+      "fields": {
+        "actor": "ins-7",
+        "kind": "log",
+        "log": {
+          "level": "warn",
+          "message": "queue depth odd"
+        },
+        "seq": 42,
+        "ts": 1772000000000000
+      },
+      "kind": "record",
+      "name": "record-log-no-attrs"
+    },
+    {
+      "canonical_hex": "a5627473056373657107646b696e64666d6574726963656163746f7265696e732d32666d6574726963a3646e616d656c6c6574746572732e7365656e6576616c7565fb40080000000000006a696e737472756d656e7467636f756e746572",
+      "fields": {
+        "actor": "ins-2",
+        "kind": "metric",
+        "metric": {
+          "instrument": "counter",
+          "name": "letters.seen",
+          "value": 3.0
+        },
+        "seq": 7,
+        "ts": 5
+      },
+      "kind": "record",
+      "name": "record-metric-counter-whole-value-is-float"
+    },
+    {
+      "canonical_hex": "a5627473056373657107646b696e64666d6574726963656163746f7265696e732d32666d6574726963a4646e616d656b71756575652e646570746864756e6974697b6c6574746572737d6576616c7565fb3fd00000000000006a696e737472756d656e74656761756765",
+      "fields": {
+        "actor": "ins-2",
+        "kind": "metric",
+        "metric": {
+          "instrument": "gauge",
+          "name": "queue.depth",
+          "unit": "{letters}",
+          "value": 0.25
+        },
+        "seq": 7,
+        "ts": 5
+      },
+      "kind": "record",
+      "name": "record-metric-gauge-unit"
+    },
+    {
+      "canonical_hex": "a5627473186363736571182a646b696e646865786368616e6765656163746f7266776f726b65726865786368616e6765a36466726f6d6865787465726e616c6574735f696e185a676f7574636f6d6569636f6d6d6974746564",
+      "fields": {
+        "actor": "worker",
+        "exchange": {
+          "from": "external",
+          "outcome": "committed",
+          "ts_in": 90
+        },
+        "kind": "exchange",
+        "seq": 42,
+        "ts": 99
+      },
+      "kind": "record",
+      "name": "record-exchange-root"
+    },
+    {
+      "canonical_hex": "a5627473186363736571182b646b696e646865786368616e6765656163746f7266776f726b65726865786368616e6765a46361636b182a6466726f6d6865787465726e616c6574735f696e185b676f7574636f6d656462757379",
+      "fields": {
+        "actor": "worker",
+        "exchange": {
+          "ack": 42,
+          "from": "external",
+          "outcome": "busy",
+          "ts_in": 91
+        },
+        "kind": "exchange",
+        "seq": 43,
+        "ts": 99
+      },
+      "kind": "record",
+      "name": "record-exchange-parented-busy"
+    },
+    {
+      "canonical_hex": "a56274730c6373657104646b696e64696c6966656379636c65656163746f7265696e732d39696c6966656379636c65a2656576656e7467637261736865646664657461696c781a7265737461727465642066726573682c20617474656d70742032",
+      "fields": {
+        "actor": "ins-9",
+        "kind": "lifecycle",
+        "lifecycle": {
+          "detail": "restarted fresh, attempt 2",
+          "event": "crashed"
+        },
+        "seq": 4,
+        "ts": 12
+      },
+      "kind": "record",
+      "name": "record-lifecycle-crashed"
+    },
+    {
+      "canonical_hex": "a56274730c6373657104646b696e64677265667573616c656163746f7265696e732d39677265667573616ca2657374616765676566666563747366726561736f6e7827756e6b6e6f776e2074617267657420696e206566666563747320e2809420617474656d70742031",
+      "fields": {
+        "actor": "ins-9",
+        "kind": "refusal",
+        "refusal": {
+          "reason": "unknown target in effects — attempt 1",
+          "stage": "effects"
+        },
+        "seq": 4,
+        "ts": 12
+      },
+      "kind": "record",
+      "name": "record-refusal-effects"
+    },
+    {
+      "canonical_hex": "a5627473186463736571006464726f70a26762795f6b696e64a2636c6f670c6865786368616e6765096764726f7070656415646b696e646464726f70656163746f7260",
+      "fields": {
+        "actor": "",
+        "drop": {
+          "by_kind": {
+            "exchange": 9,
+            "log": 12
+          },
+          "dropped": 21
+        },
+        "kind": "drop",
+        "seq": 0,
+        "ts": 100
+      },
+      "kind": "record",
+      "name": "record-drop-ledger"
+    },
+    {
+      "canonical_hex": "a2636c6f67a2656c6576656c647761726e676d6573736167656f7175657565206465707468206f6464646b696e64636c6f67",
+      "fields": {
+        "kind": "log",
+        "log": {
+          "level": "warn",
+          "message": "queue depth odd"
+        }
+      },
+      "kind": "declare",
+      "name": "declare-log"
+    },
+    {
+      "canonical_hex": "a2646b696e64666d6574726963666d6574726963a3646e616d656c6c6574746572732e7365656e6576616c7565fb3ff00000000000006a696e737472756d656e7467636f756e746572",
+      "fields": {
+        "kind": "metric",
+        "metric": {
+          "instrument": "counter",
+          "name": "letters.seen",
+          "value": 1.0
+        }
+      },
+      "kind": "declare",
+      "name": "declare-metric"
+    },
+    {
+      "canonical_hex": "a2646b696e646865786368616e67656865786368616e6765a36466726f6d6865787465726e616c6574735f696e00676f7574636f6d6569636f6d6d6974746564",
+      "expect_error": "RuntimeKind",
+      "fields": {
+        "exchange": {
+          "from": "external",
+          "outcome": "committed",
+          "ts_in": 0
+        },
+        "kind": "exchange"
+      },
+      "kind": "declare",
+      "name": "declare-exchange-runtime-kind"
+    },
+    {
+      "canonical_hex": "a26464726f70a26762795f6b696e64a06764726f7070656401646b696e646464726f70",
+      "expect_error": "RuntimeKind",
+      "fields": {
+        "drop": {
+          "by_kind": {},
+          "dropped": 1
+        },
+        "kind": "drop"
+      },
+      "kind": "declare",
+      "name": "declare-drop-runtime-kind"
+    },
+    {
+      "canonical_hex": "a3636c6f67a2656c6576656c64696e666f676d657373616765626869646b696e64636c6f67656163746f7266666f72676564",
+      "expect_error": "BadForm",
+      "fields": {
+        "actor": "forged",
+        "kind": "log",
+        "log": {
+          "level": "info",
+          "message": "hi"
+        }
+      },
+      "kind": "declare",
+      "name": "declare-minted-fields-ride"
+    },
+    {
+      "canonical_hex": "a2646b696e64657370616e73657370616e73a0",
+      "expect_error": "UnknownKind",
+      "fields": {
+        "kind": "spans",
+        "spans": {}
+      },
+      "kind": "declare",
+      "name": "declare-unknown-kind"
+    },
+    {
+      "canonical_hex": "a4627473006373657100646b696e64657472616365656163746f726161",
+      "expect_error": "UnknownKind",
+      "fields": {
+        "actor": "a",
+        "kind": "trace",
+        "seq": 0,
+        "ts": 0
+      },
+      "kind": "record",
+      "name": "record-unknown-kind"
+    },
+    {
+      "canonical_hex": "a562747301636c6f67a3656174747273626e6f656c6576656c64696e666f676d6573736167656268696373657101646b696e64636c6f67656163746f726161",
+      "expect_error": "BadForm",
+      "fields": {
+        "actor": "a",
+        "kind": "log",
+        "log": {
+          "attrs": "no",
+          "level": "info",
+          "message": "hi"
+        },
+        "seq": 1,
+        "ts": 1
+      },
+      "kind": "record",
+      "name": "record-attrs-not-a-map"
+    },
+    {
+      "canonical_hex": "ff00",
+      "expect_error": "Decode",
+      "kind": "record",
+      "name": "garbage-bytes"
+    },
+    {
+      "canonical_hex": "a5627473016373657101646b696e646865786368616e6765656163746f7261776865786368616e6765a36466726f6d6865787465726e616c6574735f696e00676f7574636f6d6503",
+      "expect_error": "BadForm",
+      "fields": {
+        "actor": "w",
+        "exchange": {
+          "from": "external",
+          "outcome": 3,
+          "ts_in": 0
+        },
+        "kind": "exchange",
+        "seq": 1,
+        "ts": 1
+      },
+      "kind": "record",
+      "name": "record-outcome-not-text"
+    }
+  ],
+  "profile": "telemetry-v0"
+}

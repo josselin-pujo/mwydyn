@@ -1,8 +1,7 @@
 # 44 — The telemetry outbox
 
-> Status: DECIDED 2026-11-10 (owner, session — four forks taken one
-> at a time). Spec §3.6. Implementation queued (staging in §7 below);
-> vectors `telemetry-v0` are part of the definition of done.
+> Status: implemented and green (2026-11-10, three commits). Spec
+> §3.6; vectors `telemetry-v0` committed. 37 suites, clippy clean.
 
 ## 1. Where we started (the drift surface)
 
@@ -214,3 +213,40 @@ Owner's scope line on record: **OTel mapping is out of scope** for
 this round and for the core permanently; the types merely project
 cleanly (severity numbers, delta temporality, seq/ack span identity,
 context name → resource).
+
+## 8. What landed (implementation record, 2026-11-10)
+
+Three commits, each independently green (36 → 36 → 37 suites):
+
+1. **data + core** — `mwydyn-data/src/telemetry.rs` (the record,
+   canonical forms, declare form); `Level` moved to mwydyn-data;
+   `Effect::Emit { record }` + `Effect::log/log_with/metric/
+   metric_with`; the ring (`telemetry_capacity`, drop-oldest,
+   per-kind ledger) + `drain_telemetry()`; exchange/lifecycle/
+   refusal minting in the pump paths (serial + pool — `ts_in`
+   rides the WaveJob/WaveOutcome); the injection handle
+   (`Accepted { seq }`, `parent` validated by
+   `JournalRead::seq_exists` — a default impl over lineages'
+   `covered`, seqs being contiguous); runtime kinds struck at
+   Phase 2 (compose parity with the barrier's refusal).
+2. **barrier + SDK** — `BarrierEffect::Emit` (additive verb, NO
+   ABI bump; runtime kinds refused as `emit:<kind>` — pinned
+   spelling; minted fields refused outright); wasm maps it
+   unstamped; `mwydyn-guest` mirrors the native helpers. Proofs:
+   a canned WAT guest's emit lands CORE-STAMPED with its exchange
+   record minted alongside; a forged `lifecycle` emit dead-letters
+   through the real strike path.
+3. **vectors** — `telemetry-v0` (19 cases: six kinds' full forms,
+   declare forms unstamped, the refusal table incl. garbage) +
+   `gen-telemetry-v0` + the harness; spec §8's corpus inventory
+   updated.
+
+Implementation notes worth keeping:
+- `telemetry()` returns a Vec COPY — a wrapped drop-oldest ring has
+  no contiguous slice (found by the perf test tripping a
+  debug_assert; the copy is the honest accessor).
+- The old busy Debug string is GONE: the busy fact is the exchange
+  record (tests assert `Exchange { outcome: Busy }` now).
+- Hydration's journal guard needed scoping (field-disjoint borrows
+  were fine for the old Vec push; method calls are not).
+- The ticker's two warn emits ride the helpers like everything else.

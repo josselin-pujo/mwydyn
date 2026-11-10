@@ -88,7 +88,8 @@
   response envelope spellings (generator + harness, barrier-v0's
   pattern). Remaining: mwydyn-stdlib (the merge actor); guest SDKs
   beyond Rust.
-- **Telemetry outbox (round 44, spec §3.6, DECIDED):** closed-kind
+- **Telemetry outbox (round 44, spec §3.6 — LANDED 2026-11-10,
+  three commits):** closed-kind
   records (`log | metric | exchange | lifecycle | refusal | drop`),
   runtime-minted `ts`/`actor`/`seq`, core-attached lineage (one
   `exchange` record per delivery attempt = the span skeleton),
@@ -96,7 +97,7 @@
   records, ungated emission, the injection handle (`post` returns
   seq, accepts a core-validated parent). OTel mapping stays out of
   core, out of scope. Landed as three commits, each independently
-  green:
+  green (36 → 36 → 37 suites):
   1. **data + core** — `mwydyn-data/src/telemetry.rs` (record +
      canonical forms + guest-declare subset); core: `Effect::Emit
      { record }` + helpers, the ring/drain/drop ledger, exchange/
