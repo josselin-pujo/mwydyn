@@ -6,8 +6,11 @@
 > arithmetic, JSON escaping, Math.pow, RegExp, frozen Date,
 > exception recovery — on the Rust-owned heap. Host engine tests
 > green at native speed; workspace 35 suites, clippy clean.
-> Remaining: wrapper/conversion/prelude (phase 2-3), build tool,
-> TS package, examples. Direction owner-ratified in session:
+> Remaining: the BUILD TOOL (script-slot probe + data-segment
+> append), TS package, example guests, container proofs. The
+> WRAPPER ITSELF now compiles both targets (guest.rs + convert.rs +
+> prelude.js: three words with probe-time mwydyn_decl boot, ambient
+> bridging, telemetry emit from day one — Effect.log/metric, §3.6). Direction owner-ratified in session:
 > JS guest next, TYPESCRIPT FIRST-CLASS — the types are a
 > conformance aid, not documentation. Forks below carry DEFAULTS IN
 > FORCE, none individually ratified (owner unanswered in session —

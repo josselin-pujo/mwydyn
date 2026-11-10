@@ -135,3 +135,40 @@ extern "C" {
     pub fn JS_IsArray(val: JSValueConst) -> bool;
     pub fn JS_IsError(val: JSValueConst) -> bool;
 }
+
+// ---- conversion-layer additions (round 43 wrapper) ----
+pub type JSPropertyEnum = c_void;
+pub const JS_GPN_STRING_MASK: i32 = 0; // default: string properties
+pub const JS_PROP_C_W_E: i32 = 0x01 | 0x02 | 0x04; // configurable|writable|enumerable
+
+extern "C" {
+    pub fn JS_NewArray(ctx: *mut JSContext) -> JSValue;
+    pub fn JS_SetPropertyUint32(ctx: *mut JSContext, this_obj: JSValue, idx: u32, val: JSValue) -> i32;
+    pub fn JS_GetOwnPropertyNames(
+        ctx: *mut JSContext,
+        ptab: *mut *mut JSPropertyEnum,
+        plen: *mut u32,
+        obj: JSValueConst,
+        flags: i32,
+    ) -> i32;
+    pub fn JS_FreePropertyEnum(ctx: *mut JSContext, tab: *mut JSPropertyEnum, len: u32);
+    pub fn JS_DefinePropertyValueStr(
+        ctx: *mut JSContext,
+        this_obj: JSValue,
+        prop: *const u8,
+        val: JSValue,
+        flags: i32,
+    ) -> i32;
+    pub fn JS_NewUint8ArrayCopy(ctx: *mut JSContext, buf: *const u8, len: usize) -> JSValue;
+    pub fn JS_ToInt32(ctx: *mut JSContext, pres: *mut i32, val: JSValueConst) -> i32;
+    pub fn JS_GetArrayBuffer(ctx: *mut JSContext, pbuf: *mut *mut u8, obj: JSValueConst) -> i32;
+    pub fn JS_NewCFunction(
+        ctx: *mut JSContext,
+        func: Option<unsafe extern "C" fn(*mut JSContext, JSValue, i32, *mut JSValue) -> JSValue>,
+        name: *const u8,
+        length: i32,
+    ) -> JSValue;
+    pub fn JS_Throw(ctx: *mut JSContext, obj: JSValue) -> JSValue;
+    pub fn JS_NewInt32(ctx: *mut JSContext, v: i32) -> JSValue;
+    pub fn JS_AtomToCStringLen(ctx: *mut JSContext, plen: *mut usize, atom: u32) -> *const u8;
+}
