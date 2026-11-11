@@ -354,6 +354,20 @@ python-driven context, a PYTHON actor + the round-43 JS echo guest
 composing, ONE drain_telemetry showing logs from BOTH realms.
 Lesson: effect addresses resolve AT THE SHIM (AmbientParts context),
 never the builder. Tests: PYO3_PYTHON=C:/Python312/python.exe.
-**Next:** the PyO3 host-side embedding
-(owner-ratified role; stateless-only v0 default); mwydyn-stdlib
-(the merge actor); epoch/fuel budgets armed per exchange.
+**ROUND 46: WASMTIME 47 + THE MWYDYN-JS LIBRARY SURFACE**
+(work-notes/46): `mwydyn-wasm`/`mwydyn-js`/`mwydyn-guest-js` on
+wasmtime 47.0.4 — pinned to match the FIRST EXTERNAL CONSUMER
+(platformc's tree already carries 47 via vendored googlesql-rs; one
+wasmtime, not two). wasmtime 47 left the std error hierarchy: take
+the `anyhow` cargo feature (restores `?` into anyhow::Error), its
+sealed `error::Context` for Result-context; everything else (epoch
+interruption, barrier exchange, statefulness probe, ambient linker)
+compiled untouched — the suite passed without modification, 46
+suites green, clippy clean. `mwydyn-js` splits lib + thin CLI:
+`compose(engine, script) -> Composed { wasm, slot }` (NUL is the
+library's job), `probe_slot` public — embedders consume the library
+(platformc's compose-js is the first). No design change: §9, the
+barrier, and the SDK surfaces are byte-identical.
+**Next:** platformc integration lands the first non-Athena consumer
+(1.0-bar progress); mwydyn-stdlib (the merge actor); epoch/fuel
+budgets armed per exchange.

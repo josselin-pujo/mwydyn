@@ -14,7 +14,7 @@ name = "mwydyn-js"
 path = "src/main.rs"
 
 [dependencies]
-wasmtime = "26"
+wasmtime = { version = "47", features = ["anyhow"] }
 wasm-encoder = "0.221"
 wasmparser = "0.221"
 anyhow = "1"

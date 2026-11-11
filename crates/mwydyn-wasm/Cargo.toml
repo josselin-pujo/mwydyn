@@ -9,6 +9,6 @@ mwydyn-data = { path = "../mwydyn-data" }
 mwydyn-core = { path = "../mwydyn-core" }
 # Round 33: CBOR all the way — the component model is gone; plain
 # core modules over linear memory (wasm32-unknown-unknown guests).
-wasmtime = "26"
+wasmtime = { version = "47", features = ["anyhow"] }
 
 [dev-dependencies]
