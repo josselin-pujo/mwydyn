@@ -6,9 +6,18 @@ edition.workspace = true
 [dependencies]
 anyhow = "1"
 mwydyn-data = { path = "../mwydyn-data" }
-mwydyn-core = { path = "../mwydyn-core" }
+# default-features = false: the container never touches the durable
+# tier — SQLiteJournal appears only in THIS crate's tests (below). A
+# consumer embedding mwydyn-wasm must stay free to keep exactly ONE
+# bundled SQLite in its graph (platformc carries rusqlite 0.37 for its
+# enriched cache; libsqlite3-sys declares `links = "sqlite3"`, so a
+# second bundled copy cannot even coexist).
+mwydyn-core = { path = "../mwydyn-core", default-features = false }
 # Round 33: CBOR all the way — the component model is gone; plain
 # core modules over linear memory (wasm32-unknown-unknown guests).
 wasmtime = { version = "47", features = ["anyhow"] }
 
 [dev-dependencies]
+# The durable-reopen proof (§7.6 through SQLiteJournal) re-enables the
+# sqlite feature for the test build only.
+mwydyn-core = { path = "../mwydyn-core", features = ["sqlite"] }
