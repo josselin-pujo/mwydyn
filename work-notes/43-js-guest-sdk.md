@@ -12,9 +12,15 @@
 > the external outbox + the §3.6 telemetry log in the drain, the
 > host never learning JS exists (§1's law, proven). Telemetry rode
 > the prelude from day one (Effect.log/metric).
-> KNOWN ISSUE, pinned: the wrapper crashes under Rust opt-level >= 1
-> (C stays O2) — the workspace profile pins the crate to 0; the
-> hunt is the top follow-up (optimizer-sensitive FFI UB suspected). Direction owner-ratified in session:
+> RESOLVED (2026-11-11): the opt-level crash was NOT FFI UB — the
+> script slot was an IMMUTABLE static, and at opt >= 1 LLVM folds
+> reads of it to the all-zero initializer (Rust's model says
+> immutable statics never change), so the tool's data segment was
+> never read ("no script in the slot" — while the bytes sat in
+> memory). FIX: static mut + raw-pointer reads; the profile pin is
+> REMOVED; default-release O3 green across smoke, the container
+> proof ×5, and the interop bench. The probe test (tests/probe.rs)
+> stays as the regression diagnostic. Direction owner-ratified in session:
 > JS guest next, TYPESCRIPT FIRST-CLASS — the types are a
 > conformance aid, not documentation. Forks below carry DEFAULTS IN
 > FORCE, none individually ratified (owner unanswered in session —
@@ -192,9 +198,15 @@ crate (pinned release, checksum recorded) — the build never fetches.
   message) and readable WITHOUT calling the trapped instance — the
   buffer exports as a wasm global: [u32 le LEN][message]. Marker
   scans fail: the marker consts live in rodata too.
-- **The release-only crash**: opt-level >= 1 breaks the wrapper (C
-  at O2 both ways, debug fine). Pinned to 0 in the workspace
-  profile; root-causing it is the follow-up.
+- **The release-only crash, RESOLVED**: opt-level >= 1 "broke the
+  wrapper" — the script slot was an immutable static and LLVM
+  lawfully folded its reads to zeros (the data segment's write is
+  invisible to the optimizer). The bytes were IN MEMORY while the
+  code read folded zeros — the probe's slot-dump proved it in one
+  step. static mut + raw reads; pin removed. THE LESSON: anything a
+  build tool initializes post-link (data segments!) must be static
+  mut / UnsafeCell — immutability is a promise to the optimizer,
+  not a description of the artifact.
 
 ## Provenance
 

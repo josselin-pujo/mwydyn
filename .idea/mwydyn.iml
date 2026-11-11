@@ -10,6 +10,20 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-vectors/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-core/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-data/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-guest-counter/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-guest-dedup/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-guest-js/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-guest-js/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-guest-js/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-guest-minimal/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-guest-store/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-guest/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-guest/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-js/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-py/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-py/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-wasm/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/mwydyn-wasm/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

@@ -16,12 +16,6 @@ members = [
     "crates/mwydyn-py",
 ]
 
-# round 43 (v0): the JS guest wrapper crashes under opt-level>=2
-# (release-only, C stays O2 both ways — an optimizer-sensitive FFI
-# UB under investigation, work-notes/43). Pinned to 0 until found.
-[profile.release.package.mwydyn-guest-js]
-opt-level = 0
-
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

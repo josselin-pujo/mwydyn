@@ -17,7 +17,13 @@ use mwydyn_guest::{Actor, Cx, Durable, Effect};
 /// The script slot: `mwydyn-js build` appends an active data segment
 /// here (script bytes + NUL). 4 MiB cap; BSS costs nothing until
 /// written.
-static MWJS_SCRIPT: [u8; 4 << 20] = [0; 4 << 20];
+///
+/// MUST be `static mut` (raw-pointer reads): the tool's data segment
+/// initializes it at instantiation — but an IMMUTABLE static lets
+/// LLVM fold reads to the all-zero initializer at opt-level >= 1
+/// (the "no script in the slot" release-only crash, found the hard
+/// way: the bytes were in memory, the fold never looked).
+static mut MWJS_SCRIPT: [u8; 4 << 20] = [0; 4 << 20];
 
 /// THE BARRIER EXCHANGE: decode → receive → encode. Same law as the
 /// SDK's process_impl (strikes panic), local because the ambient
@@ -46,12 +52,19 @@ unsafe fn barrier_exchange(req_ptr: *const u8, req_len: usize) -> *mut u8 {
 #[no_mangle]
 #[no_mangle]
 pub extern "C" fn mwydyn_script_slot() -> i32 {
-    MWJS_SCRIPT.as_ptr() as i32
+    // SAFETY: address computation only.
+    std::ptr::addr_of_mut!(MWJS_SCRIPT) as i32
 }
 
 fn script_source() -> &'static [u8] {
-    let end = MWJS_SCRIPT.iter().position(|b| *b == 0).unwrap_or(0);
-    &MWJS_SCRIPT[..end]
+    // SAFETY: the data segment wrote the script before any call;
+    // single-threaded wasm. The raw read defeats the zero-fold.
+    unsafe {
+        let slot = std::ptr::addr_of_mut!(MWJS_SCRIPT);
+        let bytes = &*slot;
+        let end = bytes.iter().position(|b| *b == 0).unwrap_or(0);
+        &bytes[..end]
+    }
 }
 
 /// The whole actor: a lazily-booted engine + the script's

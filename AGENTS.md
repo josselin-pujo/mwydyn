@@ -335,10 +335,12 @@ engine (quickjs-ng v0.18.0 freestanding), wrapper+conversion+prelude
 registration IS the §9.2 declaration; Effect.log/metric from day
 one), the `mwydyn-js` build tool (script-slot probe + data-segment
 append), @mwydyn/guest types-only TS package, and the container
-proof (echo + the §3.6 telemetry log in the drain). KNOWN ISSUE:
-wrapper crashes at Rust opt-level >= 1 (pinned to 0; FFI UB hunt
-open — the note's lessons: NUL wall ×4, atom-direct conversion,
-allocation-free panic stash via exported global).
+proof (echo + the §3.6 telemetry log in the drain). KNOWN ISSUE
+RESOLVED (2026-11-11): the "opt-level crash" was LLVM LAWFULLY
+zero-folding reads of the IMMUTABLE script-slot static (the build
+tool's data-segment write is invisible to the optimizer) — static
+mut + raw reads; pin removed; O3 green everywhere. THE LESSON:
+anything a tool initializes post-link must be static mut.
 **ROUND 45: THE PYTHON HOST EMBEDDING — THE INTEROP BENCH LIVES**
 (work-notes/45): `mwydyn-py` (pyo3 0.23, host-side peer crate) —
 the walking-test surface as a Python API (Context/spawn_python/
