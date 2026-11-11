@@ -110,6 +110,11 @@ struct GuestRt {
     /// boot carries a snapshot ref (the container blob_gets host-side
     /// and hands the bytes over).
     restore_fn: Option<TypedFunc<(i32, i32), ()>>,
+    /// The JS panic stash's address global (round 43 exports the static
+    /// as a CONST i32 global; the message bytes live in linear memory).
+    /// Captured explicitly — the Var-only globals list above exists for
+    /// the state image and must not grow const entries.
+    panic_stash: Option<Global>,
     /// `snapshot() -> resp_ptr` (`[u32 len][state bytes]`) — the
     /// embedding's `Context::snapshot_actor` pulls durable state.
     snapshot_fn: Option<TypedFunc<(), i32>>,
@@ -180,7 +185,8 @@ impl WasmActor {
     }
 
     /// §9.2 — read `mwydyn_decl` from one throwaway instantiation.
-    fn probe_mode(engine: &WasmEngine, module: &Module) -> Result<GuestMode, anyhow::Error> {
+    
+fn probe_mode(engine: &WasmEngine, module: &Module) -> Result<GuestMode, anyhow::Error> {
         let mut store = Store::new(engine.engine(), None);
         // Epoch budget mirrors make_rt: the probe only reads a flag,
         // but the default deadline is EXPIRED (an instant trap).
@@ -252,8 +258,10 @@ impl WasmActor {
             .get_typed_func::<(i32, i32), ()>(&mut store, "restore")
             .ok();
         let snapshot_fn = instance.get_typed_func::<(), i32>(&mut store, "snapshot").ok();
+        let panic_stash = instance.get_global(&mut store, "MWJS_PANIC_BUF");
         Ok(GuestRt {
             store,
+            panic_stash,
             globals,
             alloc_fn,
             dealloc_fn,
@@ -325,6 +333,39 @@ impl WasmActor {
     /// One barrier exchange: canonical request in, wall-validated
     /// effects out. EVERY failure mode — trap, garbage bytes, bad
     /// shape — is a crash, and crashes are supervision's problem.
+/// The JS panic stash (round 43's `MWJS_PANIC_BUF` engine global): a
+/// process trap on a JS guest usually means a wrapper panic, and the
+/// hook stashed the message there before aborting. Best-effort
+/// diagnostics — absent global, zero length, or out-of-range bytes all
+/// yield "" (a hand-rolled guest has no stash and no message).
+fn js_panic_stash(rt: &mut GuestRt) -> String {
+    // The stash exports as a CONST global (it holds the static's
+    // ADDRESS; the bytes live in linear memory) — so it is not in
+    // rt.globals, which deliberately collects Var globals only (the
+    // state-image law). It is captured explicitly in make_rt.
+    let Some(global) = &rt.panic_stash else {
+        return String::new();
+    };
+    let global = global.clone();
+    let Some(addr) = global.get(&mut rt.store).i32() else {
+        return String::new();
+    };
+    let addr = addr as usize;
+    let mem = rt.memory.data(&rt.store);
+    if addr + 4 > mem.len() {
+        return String::new();
+    }
+    let len = u32::from_le_bytes([mem[addr], mem[addr + 1], mem[addr + 2], mem[addr + 3]]) as usize;
+    if len == 0 || addr + 4 + len > mem.len() {
+        return String::new();
+    }
+    format!(
+        "
+  js panic stash: {}",
+        String::from_utf8_lossy(&mem[addr + 4..addr + 4 + len])
+    )
+}
+
     fn barrier_exchange(&mut self, req: &BarrierRequest) -> Vec<Effect> {
         let rt = self.rt.as_mut().expect("ensure_ready ran");
         let req_bytes = encode(&req.to_value());
@@ -340,7 +381,12 @@ impl WasmActor {
         let out_ptr = rt
             .process_fn
             .call(&mut rt.store, (in_ptr, req_bytes.len() as i32))
-            .unwrap_or_else(|e| panic!("wasm barrier: process trap: {e}"));
+            .unwrap_or_else(|e| {
+                panic!(
+                    "wasm barrier: process trap: {e}{}",
+                    Self::js_panic_stash(rt)
+                )
+            });
 
         let mut len_buf = [0u8; 4];
         rt.memory

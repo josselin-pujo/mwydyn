@@ -90,3 +90,85 @@ fn js_echo_guest_through_the_container() {
     });
     assert!(saw_echo_log, "the JS actor's Effect.log reached the outbox");
 }
+
+/// ROUND 47 — THE JS GUEST'S AMBIENT SURFACE (the regression pin for the
+/// double-free the trampoline carried since round 43: it freed its
+/// JSValueConst argv, and quickjs freed it again at frame teardown —
+/// invisible until the first script that actually called cx.blob*;
+/// the echo never did, and the Rust store guest couldn't catch it).
+/// A composed JS guest puts a blob, gets it back, and replies with both
+/// the ref and the round-tripped bytes. Cap rows granted at spawn — the
+/// ambient surface is grant-checked at every call.
+#[test]
+fn js_guest_ambient_blob_round_trip() {
+    if !Path::new("tests/artifacts/mwydyn_guest_js.wasm").exists() {
+        eprintln!("SKIP: engine artifact missing — run scripts/build-guest-js.sh");
+        return;
+    }
+    // Compose the ambient script into the engine through the same
+    // library the build tool uses — no second committed artifact to rot.
+    let engine_bytes = std::fs::read("tests/artifacts/mwydyn_guest_js.wasm").expect("engine");
+    let script = r#"
+mwydyn.entry({
+  receive(letter, cx) {
+    const body = new Uint8Array([1, 2, 3, 0xff]);
+    const ref = cx.blobPut(body, "application/x-probe");
+    const back = cx.blobGet(ref);
+    const len = cx.blobLen(ref);
+    return [mwydyn.Effect.reply(letter, cx, "probe.ambient@1", {
+      ref: ref,
+      bytes: back,
+      len: len,
+      caps: cx.caps().length,
+    })];
+  },
+});
+"#;
+    let composed = mwydyn_js::compose(&engine_bytes, script.as_bytes()).expect("compose");
+    let mut ctx = Context::new("ja");
+    ctx.spawn(
+        Spawn::new(
+            Some("amb"),
+            Box::new(move || {
+                let engine = WasmEngine::new().expect("engine");
+                Box::new(
+                    WasmActor::from_compiled(&engine, &composed.wasm).expect("guest"),
+                )
+            }),
+        )
+        .rows(vec![
+            mwydyn_core::CapRow::new("blob.read", "*"),
+            mwydyn_core::CapRow::new("blob.write", "*"),
+        ])
+        .supervision(Supervision::Restart),
+    )
+    .unwrap();
+    ctx.post(
+        &addr("ja", "amb"),
+        Letter::new("probe.kick@1", encode(&Value::Null), None, None, vec![]).unwrap(),
+        vec![],
+        None,
+    );
+    ctx.run_until_idle(1000);
+
+    let drained = ctx.drain_external();
+    assert_eq!(drained.len(), 1, "one reply (a double-free here is a strike, not a reply)");
+    let v = decode(&drained[0].letter.payload, &DecodeOptions::default()).expect("canonical");
+    let obj = match &v { Value::Map(pairs) => pairs.clone(), other => panic!("map expected, got {other:?}") };
+    let get = |k: &str| obj.iter().find(|(key, _)| key == k).map(|(_, v)| v).expect("field");
+    // the ref round-tripped as a real BlobRef (branded object → Value)
+    let (digest, size) = match get("ref") {
+        Value::BlobRef { digest, size, .. } => (digest.clone(), *size),
+        other => panic!("BlobRef expected, got {other:?}"),
+    };
+    // the bytes round-tripped Uint8Array → Bytes, content identical
+    assert_eq!(
+        get("bytes"),
+        &Value::Bytes(vec![1, 2, 3, 0xff]),
+        "blob bytes survive the ambient round trip"
+    );
+    assert_eq!(get("len"), &Value::Int(4), "blobLen agrees with the bytes");
+    assert_eq!(size, 4, "the ref's hash-bound size agrees");
+    assert!(!digest.is_empty());
+    assert_eq!(get("caps"), &Value::Int(2), "the two granted rows are visible");
+}

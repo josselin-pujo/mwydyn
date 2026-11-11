@@ -368,6 +368,28 @@ suites green, clippy clean. `mwydyn-js` splits lib + thin CLI:
 library's job), `probe_slot` public — embedders consume the library
 (platformc's compose-js is the first). No design change: §9, the
 barrier, and the SDK surfaces are byte-identical.
+**ROUND 47: THE JS GUEST'S AMBIENT SURFACE — FOUND BY THE FIRST
+CONSUMER** (work-notes/47): platformc's pass contract stages both
+directions through blobs — exactly the surface round 43 never
+exercised (the JS echo never called cx.blob*; the ambient suite
+drives the RUST store guest) — and hit three wrapper defects on its
+first blobPut: (1) the ambient trampoline freed its JSValueConst argv
+(borrowed — quickjs frees it) = double free, the js_free_value_rt
+crash; (2) JS_GetArrayBuffer's binding reshaped the real signature
+(data pointer is the RETURN, size goes through psize) so the
+typed-array branch of js_to_value NEVER ran — a Uint8Array fell to
+plain-object conversion, indices as keys, refused BadKeyHygiene("0");
+(3) the round-43 panic stash was unreadable through the container
+(MWJS_PANIC_BUF exports as a CONST global — the Var-only collector
+skips it) — GuestRt now captures it explicitly and the barrier's
+process-trap panic appends "js panic stash: <message>", so every
+future JS guest trap is debuggable from the host error alone. Plus
+the branded-ref/byteLength property-value leaks. Regression pin:
+js_guest_ambient_blob_round_trip (composed JS guest: put → get →
+reply ref+bytes+len+caps; BlobRef round-trips as a real tag-1002);
+build-guest-js.sh stages the uncomposed engine. Container suite green
+incl. the pin. No design change — §9.4 was right in the spec and in
+the Rust SDK.
 **Next:** platformc integration lands the first non-Athena consumer
 (1.0-bar progress); mwydyn-stdlib (the merge actor); epoch/fuel
 budgets armed per exchange.

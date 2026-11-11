@@ -115,11 +115,15 @@ unsafe extern "C" fn ambient_trampoline(
         let engine = actor.engine.as_mut().expect("engine live during ambient");
         let _ = argc;
         let req = std::ptr::read_unaligned(argv);
+        // argv carries JSValueConst — BORROWED references quickjs frees
+        // itself at frame teardown. Freeing one here double-frees (found
+        // by platformc: the JS guest's first cx.blobGet crashed in
+        // js_free_value_rt — the JS x ambient combination had no test
+        // until the round-47 regression pin).
         let request = match js_to_value(engine, req) {
             Ok(v) => v,
             Err(e) => return throw_js(engine, &e.message),
         };
-        ffi::JS_FreeValue(engine.ctx(), req);
         match mwydyn_guest::ambient_call(request) {
             Ok(v) => value_to_js(engine, &v),
             Err(code) => {

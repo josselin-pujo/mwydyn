@@ -161,7 +161,15 @@ extern "C" {
     ) -> i32;
     pub fn JS_NewUint8ArrayCopy(ctx: *mut JSContext, buf: *const u8, len: usize) -> JSValue;
     pub fn JS_ToInt32(ctx: *mut JSContext, pres: *mut i32, val: JSValueConst) -> i32;
-    pub fn JS_GetArrayBuffer(ctx: *mut JSContext, pbuf: *mut *mut u8, obj: JSValueConst) -> i32;
+    // REAL quickjs-ng shape: the data pointer is the RETURN, the size
+    // goes through psize — round 47: the old binding reshaped this as
+    // (ctx, pbuf*, obj) -> i32, so every call misread its arguments and
+    // the typed-array branch of js_to_value NEVER ran (the first script
+    // to hand the wrapper a Uint8Array — platformc's blob.put — exposed
+    // it as BadKeyHygiene("0"): the array fell through to plain-object
+    // conversion with its indices as keys).
+    pub fn JS_GetArrayBuffer(ctx: *mut JSContext, psize: *mut usize, obj: JSValueConst)
+        -> *mut u8;
     // JS_NewCFunction is a static inline in the header — the real
     // entry point is JS_NewCFunction2 (generic calling convention).
     pub fn JS_NewCFunction2(

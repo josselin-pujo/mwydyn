@@ -10,6 +10,9 @@ cargo build -p mwydyn-js --release
 ART=crates/mwydyn-wasm/tests/artifacts
 mkdir -p "$ART"
 ENG=target/wasm32-unknown-unknown/release/mwydyn_guest_js.wasm
+# the UNCOMPOSED engine — the round-47 ambient regression test composes
+# its own script through the mwydyn-js library
+cp "$ENG" "$ART/mwydyn_guest_js.wasm"
 TOOL=target/release/mwydyn-js.exe
 [ -f "$TOOL" ] || TOOL=target/release/mwydyn-js
 
