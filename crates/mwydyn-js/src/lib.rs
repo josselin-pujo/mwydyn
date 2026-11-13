@@ -154,8 +154,8 @@ mod tests {
             eprintln!("skip: engine artifact absent — build via scripts/build-guest-js.sh");
             return;
         };
-        let composed = compose(&engine, b"mwydyn.entry({ receive() { return []; } });")
-            .expect("compose engine + script");
+        let script = b"mwydyn.entry({ receive() { return []; } });";
+        let composed = compose(&engine, script).expect("compose engine + script");
         let module = wasmtime::Module::new(&wasmtime::Engine::default(), &composed.wasm)
             .expect("composed artifact parses as a module");
         let mut found = false;
@@ -163,13 +163,18 @@ mod tests {
             if let wasmparser::Payload::DataSection(reader) = payload.expect("data section") {
                 for seg in reader {
                     let seg = seg.expect("segment");
-                    if seg.data.windows(5).any(|w| w == b"mwydyn") {
+                    // FULL script, verbatim — the round-46 pin scanned
+                    // `windows(5)` against the 6-byte literal "mwydyn"
+                    // (never true) and read green only while the engine
+                    // artifact was absent; born skipped, found by round
+                    // 48's workspace run once round 47 staged the engine.
+                    if seg.data.windows(script.len()).any(|w| w == script) {
                         found = true;
                     }
                 }
             }
         }
-        assert!(found, "script bytes must land in the composed data section");
+        assert!(found, "script bytes must land VERBATIM in the composed data section");
         assert!(module.imports().count() <= 1, "at most the ambient import");
         assert!(composed.slot > 0, "slot probe returned a live address");
     }
