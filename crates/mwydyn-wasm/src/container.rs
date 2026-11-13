@@ -94,6 +94,55 @@ pub enum GuestMode {
     Stateful,
 }
 
+/// ROUND 48 — THE MODULE/ACTOR SPLIT, made public. An artifact is a
+/// guest module COMPILED ONCE and PROBED ONCE: the `GuestMode` rides
+/// inside as a PRIVATE field read from the guest's own declaration
+/// (§9.2), so handing an artifact around CARRIES the probe's result —
+/// no constructor anywhere TAKES a mode, and the round-41 override
+/// path stays dead (the type system cannot tell "carrying the probe's
+/// result" from "forging one", so the mode never crosses a public
+/// signature at all). `Module` is an Arc in wasmtime: compile once,
+/// clone per spawn — serve-mode (fresh actor per request, the
+/// embedder's determinism law) and sharding (N actors, one codebase)
+/// pay instantiation only, never recompilation. The probe is one
+/// throwaway instantiation (~µs–ms); paying it once per ARTIFACT
+/// instead of once per SPAWN is the whole point.
+#[derive(Clone)]
+pub struct GuestArtifact {
+    engine: Engine,
+    module: Module,
+    mode: GuestMode,
+}
+
+impl GuestArtifact {
+    /// Compile + probe in one step — the plugin-LOAD path. Errors
+    /// here are the guest's own (bad bytes, a trap in the declaration
+    /// read), so embedders surface them at load, not at first spawn.
+    pub fn compile(engine: &WasmEngine, wasm: &[u8]) -> Result<GuestArtifact, anyhow::Error> {
+        let module = Module::new(engine.engine(), wasm)?;
+        GuestArtifact::from_module(engine, module)
+    }
+
+    /// Probe a module the embedder compiled itself — same law: the
+    /// declaration is read from the guest, whatever compiled it.
+    pub fn from_module(
+        engine: &WasmEngine,
+        module: Module,
+    ) -> Result<GuestArtifact, anyhow::Error> {
+        let mode = probe_mode(engine, &module)?;
+        Ok(GuestArtifact {
+            engine: engine.engine().clone(),
+            module,
+            mode,
+        })
+    }
+
+    /// The probed declaration — read-only, for diagnostics and logs.
+    pub fn mode(&self) -> GuestMode {
+        self.mode
+    }
+}
+
 /// A live guest: one store + instance + the barrier ABI's exports.
 struct GuestRt {
     store: Store<Option<mwydyn_core::actor::AmbientParts>>,
@@ -147,20 +196,28 @@ pub struct WasmActor {
 }
 
 impl WasmActor {
-    /// From compiled guest bytes. §9.2 (round 41): the GUEST owns
-    /// its statefulness declaration — `mwydyn_decl() -> u32` bit 0,
-    /// read once here (one throwaway instantiation). Absent export
-    /// = Stateless by omission (hand-rolled guests, WAT fixtures).
+    /// From compiled guest bytes — the ONE-SHOT convenience (round
+    /// 48): compile + probe + spawn in a single call, exactly the
+    /// artifact path under it. §9.2 (round 41): the GUEST owns its
+    /// statefulness declaration — `mwydyn_decl() -> u32` bit 0, read
+    /// once (one throwaway instantiation). Absent export =
+    /// Stateless by omission (hand-rolled guests, WAT fixtures).
     /// There is no embedder override: composing a stateful guest
     /// stateless would silently break the author's exactly-once
     /// expectation — refused by removing the path.
     pub fn from_compiled(engine: &WasmEngine, wasm: &[u8]) -> Result<WasmActor, anyhow::Error> {
-        let module = Module::new(engine.engine(), wasm)?;
-        let mode = WasmActor::probe_mode(engine, &module)?;
+        WasmActor::from_artifact(&GuestArtifact::compile(engine, wasm)?)
+    }
+
+    /// Spawn from a SHARED artifact — instantiation only: the module
+    /// is the artifact's (Arc-cloned), the mode is the probe's stored
+    /// result. THE SERVE/SHARDING PATH (round 48): a fresh actor per
+    /// request or per shard, never a recompile, never a re-probe.
+    pub fn from_artifact(artifact: &GuestArtifact) -> Result<WasmActor, anyhow::Error> {
         WasmActor::assemble(
-            engine.engine().clone(),
-            module,
-            mode,
+            artifact.engine.clone(),
+            artifact.module.clone(),
+            artifact.mode,
             None,
             None,
             None,
@@ -169,40 +226,11 @@ impl WasmActor {
 
     /// From WAT text — the test-guest path (ABI mechanics, byzantine
     /// fixtures); production loads compiled artifacts. Same law as
-    /// [`WasmActor::from_compiled`]: the declaration is read from
-    /// the guest text, whatever form it arrives in.
+    /// [`WasmActor::from_compiled`]: the declaration is read from the
+    /// guest text, whatever form it arrives in.
     pub fn from_wat(engine: &WasmEngine, wat: &str) -> Result<WasmActor, anyhow::Error> {
         let module = Module::new(engine.engine(), wat)?;
-        let mode = WasmActor::probe_mode(engine, &module)?;
-        WasmActor::assemble(
-            engine.engine().clone(),
-            module,
-            mode,
-            None,
-            None,
-            None,
-        )
-    }
-
-    /// §9.2 — read `mwydyn_decl` from one throwaway instantiation.
-    
-fn probe_mode(engine: &WasmEngine, module: &Module) -> Result<GuestMode, anyhow::Error> {
-        let mut store = Store::new(engine.engine(), None);
-        // Epoch budget mirrors make_rt: the probe only reads a flag,
-        // but the default deadline is EXPIRED (an instant trap).
-        store.set_epoch_deadline(1_000_000);
-        let linker = build_linker(engine.engine());
-        let instance = linker.instantiate(&mut store, module)?;
-        let declared = instance
-            .get_typed_func::<(), i32>(&mut store, "mwydyn_decl")
-            .ok()
-            .map(|f| f.call(&mut store, ()))
-            .transpose()?;
-        Ok(if declared.unwrap_or(0) & 1 == 1 {
-            GuestMode::Stateful
-        } else {
-            GuestMode::Stateless
-        })
+        WasmActor::from_artifact(&GuestArtifact::from_module(engine, module)?)
     }
 
     fn assemble(
@@ -346,7 +374,7 @@ fn js_panic_stash(rt: &mut GuestRt) -> String {
     let Some(global) = &rt.panic_stash else {
         return String::new();
     };
-    let global = global.clone();
+    let global = *global;
     let Some(addr) = global.get(&mut rt.store).i32() else {
         return String::new();
     };
@@ -540,6 +568,28 @@ impl Actor for WasmActor {
             .call(&mut rt.store, (out_ptr, (state_len + 4) as i32));
         Some(state)
     }
+}
+
+/// §9.2 — read `mwydyn_decl` from one throwaway instantiation. The
+/// probe's RESULT is stored inside a [`GuestArtifact`] and never
+/// crosses a public signature as an input.
+fn probe_mode(engine: &WasmEngine, module: &Module) -> Result<GuestMode, anyhow::Error> {
+    let mut store = Store::new(engine.engine(), None);
+    // Epoch budget mirrors make_rt: the probe only reads a flag,
+    // but the default deadline is EXPIRED (an instant trap).
+    store.set_epoch_deadline(1_000_000);
+    let linker = build_linker(engine.engine());
+    let instance = linker.instantiate(&mut store, module)?;
+    let declared = instance
+        .get_typed_func::<(), i32>(&mut store, "mwydyn_decl")
+        .ok()
+        .map(|f| f.call(&mut store, ()))
+        .transpose()?;
+    Ok(if declared.unwrap_or(0) & 1 == 1 {
+        GuestMode::Stateful
+    } else {
+        GuestMode::Stateless
+    })
 }
 
 /// ROUND 40 — build the ambient Linker for one instantiation (one

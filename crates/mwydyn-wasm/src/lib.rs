@@ -7,4 +7,4 @@
 
 pub mod container;
 
-pub use container::{external_address, WasmActor, WasmEngine};
+pub use container::{external_address, GuestArtifact, GuestMode, WasmActor, WasmEngine};

@@ -1,6 +1,7 @@
 # Handoff — the platformc consumer's open debts (input for the next mwydyn rounds)
 
-> Status: DRAFT session input, 2026-11-13 — nothing here is decided.
+> Status: session input, 2026-11-13 — taken up the same day; see
+> "Session outcomes" at the bottom for what was decided and queued.
 > This collects the debts ADR-0019 (platformc) recorded after landing
 > mwydyn as its plugin substrate, with the numbers and the consumer-side
 > laws that should shape the designs. Expected to be taken up as one or
@@ -170,3 +171,46 @@ When it lands, platformc's example codec is deleted and the ADR-0019
 Debts 2–4 are independent; Debt 1 is self-contained. None block
 platformc today — the batch CLI cadence is fine and the interim codec
 works.
+
+---
+
+## Session outcomes (2026-11-13 — taken up in the mwydyn session)
+
+The debts were recontextualized mwydyn-side and the round queue was
+shaped; nothing above is rewritten. Decisions on record:
+
+- **Debt 1 → ROUND 48, LANDED** (`GuestArtifact`, work-notes/48).
+  The handoff's `from_precompiled(…, GuestMode)` sketch was REJECTED
+  in arbitration: a pub-enum mode parameter is the round-41 override
+  reborn (carrying a probe result is indistinguishable from forging
+  one), and the probe it would save is 0–3 ms of 350 ms. The landed
+  shape is the opaque artifact — compile once, probe once, mode
+  private; `WasmActor::from_artifact` spawns instantiation-only
+  (170 ns/spawn measured; the real instantiation is the first
+  exchange's, per round 37's lazy law). platformc's `load_plugin`
+  compiles + probes once per plugin and clones per serve spawn; the
+  cwasm serialization extension stays deferred, as the handoff
+  itself deferred it. The mwydyn-side justification on record is
+  sharding (N actors, one codebase), not platformc's serve mode —
+  which is why the round was worth landing despite the owner's
+  demotion of the consumer-side urgency.
+- **Debt 4 + Debt 3 → ROUND 49, QUEUED (owner-ratified): bundle,
+  codec first.** The prelude codec (`mwydyn.decode`/`encode`) lands
+  first — pinned to cbor-profile-v0 + blob-refs-v0, driven INSIDE
+  the real composed engine (round-47 lesson: test the FFI layer that
+  actually runs) — then the three round-43 forks are ratified DECIDED
+  in the same round, so the declared-global surface (which grows
+  `decode`/`encode`) is final before platformc's `.d.ts` copy cites
+  the ruling. Substance of all three forks uncontested.
+- **Debt 2 → ROUND 50, QUEUED, default stated:** `call_task_with(spec:
+  Spawn, letter)` with `call_task` kept and documented as the
+  zero-grant convenience (capability-quiet-by-default named in the
+  spec); the verb forces `Supervision::FailFast` like `spawn_task` —
+  a one-call round trip presumes a task that terminates. Reframe on
+  record: the correlation mint was already core-side (`call-N` off a
+  context counter) — what platformc hardcoded was its
+  re-implementation's copy; the actual debt is that the task verbs
+  (round 17) predate the ambient surface (round 40) and never met —
+  `spawn_task` hardcodes a capability-less `Spawn`. Pins: rows-bearing
+  task does blob get/put; capability-less task refused Unauthorized
+  BY NAME; correlation uniqueness under concurrent calls.

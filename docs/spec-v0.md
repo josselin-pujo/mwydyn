@@ -734,7 +734,7 @@ the response block is `[u32 le len][canonical CBOR bytes]`.
 - The payload wall applies at the barrier identically to native
   admission (compose-parity at the gate).
 
-### 9.2 Declared statefulness — the guest declares [round 37, amended round 41]
+### 9.2 Declared statefulness — the guest declares [round 37, amended rounds 41+48]
 
 The statefulness declaration belongs to the GUEST, not the
 embedder, mirroring native `fork_carries_state` (compose-parity of
@@ -751,6 +751,15 @@ the declaration itself):
   stateless would silently break the author's exactly-once
   expectation; the mismatch is refused by removing the override
   path entirely (round 41).
+- **The artifact carries the probe, never the embedder** (round 48):
+  a `GuestArtifact` is a module COMPILED ONCE and PROBED ONCE — the
+  declaration rides inside as a private field, and
+  `WasmActor::from_artifact` spawns from it (instantiation-only;
+  the module is Arc-cloned) for serve-mode and sharding, N actors
+  from one codebase. No public constructor TAKES a `GuestMode`: a
+  mode parameter in a signature cannot distinguish carrying the
+  probe's result from forging it, so the mode never crosses one —
+  the split cannot reopen the override.
 
 ### 9.3 Durable snapshots (§7.6 boot ABI) [round 39]
 

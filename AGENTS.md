@@ -390,6 +390,40 @@ reply ref+bytes+len+caps; BlobRef round-trips as a real tag-1002);
 build-guest-js.sh stages the uncomposed engine. Container suite green
 incl. the pin. No design change — §9.4 was right in the spec and in
 the Rust SDK.
-**Next:** platformc integration lands the first non-Athena consumer
-(1.0-bar progress); mwydyn-stdlib (the merge actor); epoch/fuel
-budgets armed per exchange.
+**ROUND 48: THE GUEST ARTIFACT — THE MODULE/ACTOR SPLIT MADE PUBLIC**
+(work-notes/48; first round from the platformc handoff,
+docs/handoff-platformc-consumer.md, ADR-0019 debt 1): `GuestArtifact`
+{engine, module, mode: PRIVATE} — COMPILE ONCE, PROBE ONCE, Clone at
+Arc cost; `WasmActor::from_artifact(&artifact)` spawns
+instantiation-only (lazy per round 37 — first exchange pays the
+~120µs) for SERVE-MODE (fresh actor per request, the embedder's
+determinism law) and SHARDING (N actors, one codebase — the real
+mwydyn-side debt: construction was O(compile) per shard, 40ms Rust /
+350ms quickjs). ARBITRATION (owner): a public GuestMode-TAKING
+constructor is the round-41 override reborn (pub enum = forgeable —
+carrying a probe result is indistinguishable from forging one, and
+the probe it would save is 0–3ms of 350ms = noise); the artifact
+CARRIES the probe's result in a private field — §9.2 amended: "the
+artifact carries the probe, never the embedder", no public
+constructor takes a mode anywhere. from_compiled/from_wat survive as
+one-shot conveniences (artifact + from_artifact underneath);
+probe_mode is a private free fn now. Pins (tests/artifact.rs): the
+law (round-41 WAT table through from_module, clones carry the
+declaration), the sharding shape (one compile, two counter shards,
+independent counts), the cost boundary (20 spawns < ONE raw
+Module::new; measured 170ns/spawn, pure assembly). LATENT DEFECT
+FOUND+FIXED on the workspace run: the round-46 mwydyn-js lib pin was
+BORN SKIPPED — `windows(5)` can never match the 6-byte literal
+"mwydyn", so it read green only while the engine artifact was absent
+and failed the moment round 47's script staged it; the pin now
+asserts the FULL script lands VERBATIM (class named: a
+skip-with-message pin's first full run after staging is its real
+first run). 47 suites green, clippy clean workspace-wide.
+**Next:** round 49 = the JS SDK's 1.0 surface (prelude CBOR codec
+first — mwydyn.decode/encode pinned to cbor-profile-v0/blob-refs-v0
+inside the real composed engine — then the three round-43 forks
+ratified DECIDED; owner-ratified bundle); round 50 = tasks meet the
+ambient surface (`call_task_with(spec: Spawn, letter)`, zero-grant
+call_task kept + named, correlation mint already core-side); then
+platformc integration closes out, mwydyn-stdlib (the merge actor),
+epoch/fuel budgets armed per exchange.
