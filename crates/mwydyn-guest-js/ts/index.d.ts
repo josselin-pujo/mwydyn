@@ -56,6 +56,41 @@ export declare class MwydynRefusal extends Error {
   readonly code: string;
 }
 
+/**
+ * Round 49 — the canon codec's value model. One canon, both realms:
+ * decode is liberal within the restricted type set (non-shortest
+ * heads accepted, map keys canonicalized, f16/f32 widened); encode
+ * is strict canonical. Ints arrive as `number` within ±2^53 and as
+ * `bigint` beyond; bytes are Uint8Array; a decoded BlobRef is the
+ * same branded object the host delivers.
+ */
+export type CBORValue =
+  | null
+  | boolean
+  | number
+  | bigint
+  | string
+  | Uint8Array
+  | BlobRef
+  | TimestampBox
+  | CBORValue[]
+  | { [key: string]: CBORValue };
+
+/** Tag 1001 — µs since epoch. Bare µs numbers lose the tag; the box keeps it. */
+export interface TimestampBox {
+  readonly micros: number | bigint;
+}
+
+/** Explicit floatness: `mwydyn.float(3)` encodes as 0xfb, never as an int. */
+export interface FloatBox {
+  readonly value: number;
+}
+
+/** A codec refusal — `code` is the corpus kebab name (by-name discipline). */
+export declare class MwydynCborError extends Error {
+  readonly code: string;
+}
+
 export interface Actor<T = unknown> {
   receive(letter: Letter<T>, cx: Cx): object[];
 }
@@ -79,5 +114,13 @@ declare global {
     Effect: typeof Effect;
     MwydynRefusal: typeof MwydynRefusal;
     fail(message?: string): never;
+    /** Liberal-in: valid CBOR in the restricted type set → JS value. Throws MwydynCborError. */
+    decode(bytes: Uint8Array): CBORValue;
+    /** Canonical-out: strict deterministic encoding (spec §1). Throws MwydynCborError. */
+    encode(value: CBORValue | FloatBox): Uint8Array;
+    /** Explicit floatness — the ONLY way a bare integral number stays a float. */
+    float(n: number): FloatBox;
+    /** Tag 1001 — µs since epoch (number within ±2^53, bigint to i64). */
+    timestamp(micros: number | bigint): TimestampBox;
   };
 }

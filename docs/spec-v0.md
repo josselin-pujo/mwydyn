@@ -709,7 +709,7 @@ with badly defined semantics.)
   the entire integration surface; their dependency waves (tokio,
   TLS, client SDKs) never touch the core's graph.
 
-## 9. The WASM guest contract [DECIDED, rounds 33+37+39+40+41]
+## 9. The WASM guest contract [DECIDED, rounds 33+37+39+40+41+49]
 
 Consolidated here from the rounds that built it; the barrier speaks
 the journal's vocabulary (one canon, both realms) and adds nothing
@@ -808,3 +808,55 @@ class dies at build time), and entry points making the declaration
 choice explicit — stateless / stateful / durable. Additional
 language SDKs (JS on QuickJS-ng) must expose the same three words
 over the same ABI.
+
+### 9.7 The JS guest SDK [DECIDED, round 49]
+
+The three round-43 forks are ratified with their defaults in force,
+and the prelude gains the canon codec — the surface is final as of
+this round (platformc's `.d.ts` copy cites this ruling).
+
+**The codec** (the round-43 conversion table's completion): the
+prelude ships `mwydyn.decode(bytes)` / `mwydyn.encode(value)` — one
+canon, both realms, the JS realm's mwydyn-data. DECODE IS LIBERAL
+within the restricted type set (owner, round 49): non-shortest
+heads accepted, map keys canonicalized (sorted, duplicates
+refused), f16/f32 widened to f64 — normalize, never reject valid
+CBOR. ENCODE IS STRICT canonical: shortest ints, definite lengths,
+always-f64 floats, keys sorted by (byte-length, bytes). Refusals
+carry the corpus kebab codes (by-name discipline). The JS value
+model mirrors the barrier's table: number within ±2^53,
+BigInt beyond; Uint8Array bytes; a decoded BlobRef carries the same
+`__mwRef` brand the host sets (a decoded ref IS a host ref). Two
+JS-realm facts are explicit, not lossy surprises: bare integral
+numbers are INTS (floatness is `mwydyn.float(n)`), and the
+timestamp tag survives only in its box (`mwydyn.timestamp(µs)`
+/ decode of tag 1001 — bare µs numbers lose the tag at the
+barrier, as always). ENCODE of a branded ref is a serializer, not a
+validator (forged-but-shaped refs encode; validation is the
+barrier's on crossing and decode's on reading). **Conformance:
+cbor-profile-v0 + blob-refs-v0, driven through the real composed
+engine** (round 49) — the second-realm consumption the corpora were
+written for. Out of scope, recorded: digest computation in JS
+(host-side at put) and the three validator-layer ref cases (the JS
+realm validates at the barrier, a different layer).
+
+**Fork 1 — PACKAGE SHAPE: types-only + injected prelude**
+(ratified). The npm package is types + a declared global; ALL
+runtime code is the wrapper's prelude — one runtime per
+artifact, no version skew. Rejected: runtime-in-package (two
+runtimes per artifact, skew risk).
+
+**Fork 2 — PAYLOAD TYPING: static types + bring-your-own-guard**
+(ratified). `letter.payload` is typed by the author's `TPayload`;
+runtime validation is the author's guard (`letter.payloadOf(guard)`
+— a loud refusal on malformed shape is a strike, the
+documented path). Rejected: shipping zod/io-ts (weight, and the
+core stays schema-blind — §5/round 10 law); host-side CDDL
+at admission (same law).
+
+**Fork 3 — I64 BOUNDARY: number when safe, BigInt beyond**
+(ratified). Ints within ±2^53 arrive as `number`, outside as
+`bigint`; TS says `number | bigint` with the lint nudge to widen
+early. Rejected: always-number (silent loss), always-BigInt
+(ergonomic tax). The codec and the barrier share this boundary
+exactly (the `i64::MIN` corner included — see work-notes/49).

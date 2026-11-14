@@ -24,3 +24,6 @@ mwydyn-core = { path = "../mwydyn-core", features = ["sqlite"] }
 # The round-47 JS ambient regression test composes its script through
 # the same library the build tool uses.
 mwydyn-js = { path = "../mwydyn-js" }
+# Round 49 â the prelude-codec corpus harness consumes the vector
+# runner's corpus loader and projections.
+mwydyn-vectors = { path = "../mwydyn-vectors" }

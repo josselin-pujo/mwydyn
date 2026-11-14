@@ -919,6 +919,7 @@ dependencies = [
  "mwydyn-core",
  "mwydyn-data",
  "mwydyn-js",
+ "mwydyn-vectors",
  "wasmtime",
 ]
 

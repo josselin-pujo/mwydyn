@@ -194,8 +194,10 @@ shaped; nothing above is rewritten. Decisions on record:
   sharding (N actors, one codebase), not platformc's serve mode —
   which is why the round was worth landing despite the owner's
   demotion of the consumer-side urgency.
-- **Debt 4 + Debt 3 → ROUND 49, QUEUED (owner-ratified): bundle,
-  codec first.** The prelude codec (`mwydyn.decode`/`encode`) lands
+- **Debt 4 + Debt 3 → ROUND 49, LANDED** (work-notes/49; spec §9.7
+  DECIDED — the JS-SDK surface is final, platformc's .d.ts copy
+  cites it). Original queue note (bundle, codec first):
+ The prelude codec (`mwydyn.decode`/`encode`) lands
   first — pinned to cbor-profile-v0 + blob-refs-v0, driven INSIDE
   the real composed engine (round-47 lesson: test the FFI layer that
   actually runs) — then the three round-43 forks are ratified DECIDED
@@ -214,3 +216,26 @@ shaped; nothing above is rewritten. Decisions on record:
   `spawn_task` hardcodes a capability-less `Spawn`. Pins: rows-bearing
   task does blob get/put; capability-less task refused Unauthorized
   BY NAME; correlation uniqueness under concurrent calls.
+
+---
+
+## Round 49 outcomes (2026-11-14)
+
+Debt 4 + debt 3 landed as one round, codec first as ratified. The
+prelude now ships `mwydyn.decode`/`mwydyn.encode` — decode
+NORMALIZES non-canonical-but-valid CBOR in the restricted type set
+(the owner's in-session fork decision), encode is strict canonical,
+refusals by name (corpus kebab codes). Pinned against
+cbor-profile-v0 + blob-refs-v0 THROUGH THE REAL COMPOSED ENGINE
+(65/72 driven; 7 skips with recorded reasons — digests are
+host-side at put, and the three validator-layer ref cases live at
+the JS realm's barrier, not codec-encode). The three round-43
+forks are ratified DECIDED in spec §9.7 with the declared global
+final (`decode`/`encode`/`float`/`timestamp` in the .d.ts).
+Consumer-side: adopt and delete the pass.js interim codec — that
+ADR-0019 debt closes. Bonus for ADR-0019's ledger: the round found
+and fixed two latent host-side conversion defects (the ref-field
+property names were never NUL-terminated — garbage names that
+agreed by rodata luck since round 43; and i64::MIN crossed as a
+float via an abs()-overflow in the ±2^53 boundary check) — both
+would have bitten platformc's ref-typed passes eventually.

@@ -419,11 +419,48 @@ and failed the moment round 47's script staged it; the pin now
 asserts the FULL script lands VERBATIM (class named: a
 skip-with-message pin's first full run after staging is its real
 first run). 47 suites green, clippy clean workspace-wide.
-**Next:** round 49 = the JS SDK's 1.0 surface (prelude CBOR codec
-first — mwydyn.decode/encode pinned to cbor-profile-v0/blob-refs-v0
-inside the real composed engine — then the three round-43 forks
-ratified DECIDED; owner-ratified bundle); round 50 = tasks meet the
-ambient surface (`call_task_with(spec: Spawn, letter)`, zero-grant
-call_task kept + named, correlation mint already core-side); then
-platformc integration closes out, mwydyn-stdlib (the merge actor),
-epoch/fuel budgets armed per exchange.
+**ROUND 49: THE JS SDK'S 1.0 SURFACE — PRELUDE CBOR CODEC + THE
+THREE FORKS RATIFIED** (work-notes/49; spec §9.7 DECIDED, the
+JS-SDK surface final as of this round): the prelude ships
+`mwydyn.decode(bytes)`/`mwydyn.encode(value)` — ONE canon, both
+realms, the second-realm decoder the corpora were written for.
+DECODE NORMALIZES (owner fork, in session): liberal within the
+restricted type set — non-shortest heads accepted, map keys sorted
+on read (dups refused), f16/f32 widened to f64 — mirroring the Rust
+decoder; refusals BY NAME (the corpus kebab codes ride .code).
+ENCODE strict canonical. The JS value model mirrors the barrier
+(number within ±2^53, BigInt beyond; Uint8Array; a decoded BlobRef
+carries the SAME __mwRef brand — a decoded ref IS a host ref).
+TWO EXPLICIT BOXES (JS-realm facts, not lossy surprises):
+mwydyn.float(n) = floatness (bare integral numbers ARE ints —
+3.0===3, the barrier's own rule), mwydyn.timestamp(µs) = the tag
+(bare µs numbers lose it at the barrier, as always). Encode of a
+branded ref = serializer-not-validator (round-12 law; validation is
+the barrier's on crossing, decode's on reading). HARNESS
+(mwydyn-wasm/tests/js_cbor.rs): the corpus driven through the REAL
+COMPOSED ENGINE, one guest, every case a letter; uncrossable inputs
+(bignums/timestamps/integral floats) ride an in-guest literal
+table keyed by case name; 65/72 driven, 7 skips with reasons
+(4 digest = host-side at put, JS SHA-256 out of codec scope; 3
+enc-ref-reject = the VALIDATOR layer — JS validates at the barrier,
+not codec-encode). THREE FORKS RATIFIED verbatim (§9.7): types-only
+package, BYO-guard payload typing, number-when-safe. TWO LATENT
+DEFECTS FOUND+FIXED in the round-43 conversion layer, both
+luck-dependent, both broken by the engine rebuild's layout shift:
+(1) the ref fields' property names were never NUL-terminated —
+set_str passed raw &str as_ptr() to JS_SetPropertyStr and the read
+side ditto; the names read into adjacent rodata ("digestmediaType-
+bad-keycalled Result::unwrap()...") and write/read garbage AGREED
+by sharing one rodata since round 43 — the prelude reads v.digest
+by its CLEAN name and broke the luck; fix = c"..." literals both
+sides (the class: host-side write/read FFI pairs validate each
+other forever; only a SECOND consumer of the names catches it);
+(2) i64::MIN crossed as a FLOAT — `i.abs() <= SAFE` overflows at
+i64::MIN (wraps negative in release, "-2^63 ≤ 2^53" true) → the
+float64 branch; fix = range compare. 48 suites green, clippy clean.
+**Next:** round 50 = tasks meet the ambient surface
+(`call_task_with(spec: Spawn, letter)`, zero-grant call_task kept
++ named, correlation mint already core-side, FailFast forced); then
+platformc integration closes out (codec adoption deletes pass.js's
+interim), mwydyn-stdlib (the merge actor), epoch/fuel budgets armed
+per exchange.
