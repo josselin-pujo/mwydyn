@@ -167,5 +167,10 @@ interim, ADR-0019's "contract-scoped codec" debt closes. The
   (mwydyn-wasm gains a dev-dep on mwydyn-vectors for the loader
   and projections).
 - `docs/spec-v0.md` — §9.7 added; §9 header carries round 49.
+- FOLLOW-UP (owner nit, same day): the TS surface — `Actor.receive`
+  now returns `Effect[]`, not `object[]`; `Effect` is an opaque
+  branded type (unique symbol) whose only typed path is a builder —
+  hand-shaped objects are untyped by design, symmetric with "a bare
+  number is an int until mwydyn.float says otherwise."
 - Round 50 queued unchanged: tasks meet the ambient surface
   (`call_task_with(spec: Spawn, letter)`).

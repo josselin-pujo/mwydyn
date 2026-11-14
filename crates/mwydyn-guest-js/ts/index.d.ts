@@ -36,19 +36,28 @@ export interface Cx {
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 export type Instrument = "counter" | "gauge" | "histogram";
 
+/**
+ * An effect — OPAQUE. The only typed path to an Effect is a builder
+ * below: hand-shaped objects are untyped by design (the runtime
+ * shape is the prelude's, §9.7), the way a bare number is an int
+ * until `mwydyn.float` says otherwise.
+ */
+declare const effect_brand: unique symbol;
+export type Effect = { readonly [effect_brand]: true };
+
 /** Effects are RETURNED, never called (the law). */
-export declare namespace Effect {
-  function post(to: Address, kind: string, payload: unknown): object;
-  function reply(letter: Letter, cx: Cx, kind: string, payload: unknown): object;
+export interface EffectBuilders {
+  post(to: Address, kind: string, payload: unknown): Effect;
+  reply(letter: Letter, cx: Cx, kind: string, payload: unknown): Effect;
   /** §9.5: posts to the payload's `replyTo`; null = no routing. */
-  function replyVia(letter: Letter, kind: string, payload: unknown): object | null;
-  function log(level: LogLevel, message: string, attrs?: object): object;
-  function metric(
+  replyVia(letter: Letter, kind: string, payload: unknown): Effect | null;
+  log(level: LogLevel, message: string, attrs?: object): Effect;
+  metric(
     name: string,
     instrument: Instrument,
     value: number,
     opts?: { unit?: string; attrs?: object }
-  ): object;
+  ): Effect;
 }
 
 /** Refusals are OBSERVED by name — never swallowed. */
@@ -92,7 +101,7 @@ export declare class MwydynCborError extends Error {
 }
 
 export interface Actor<T = unknown> {
-  receive(letter: Letter<T>, cx: Cx): object[];
+  receive(letter: Letter<T>, cx: Cx): Effect[];
 }
 
 export interface DurableHandlers<TState = unknown> {
@@ -111,7 +120,7 @@ declare global {
     entry(actor: Actor): void;
     statefulEntry(actor: Actor): void;
     durableEntry(actor: Actor, durable: DurableHandlers): void;
-    Effect: typeof Effect;
+    Effect: EffectBuilders;
     MwydynRefusal: typeof MwydynRefusal;
     fail(message?: string): never;
     /** Liberal-in: valid CBOR in the restricted type set → JS value. Throws MwydynCborError. */
