@@ -172,7 +172,7 @@
   authority; mitigation is attribution — every use names the row and
   the envelope's authority refs — not possession-based redesign.
 
-### 3.4 Addressing & routing [DECIDED, rounds 04–05]
+### 3.4 Addressing & routing [DECIDED, rounds 04–05, amended round 50]
 
 - **Names** `(context, name)` — readable, unique within a trust
   context; what actors post to. Not security objects (§3.3).
@@ -191,6 +191,19 @@
   named, long-lived actor.
 - Location transparency: addresses are data; resolution is a runtime
   concern; in-proc vs network never changes message bytes.
+- **The task pattern as verbs [round 50]**: `spawn_task` /
+  `call_task` / `call_task_with(spec, letter)` — an unnamed,
+  fail-fast, handle-addressed actor, scale-to-zero by lifecycle; the
+  call is the one-call round trip over the external handle
+  (correlation minted CORE-side as `call-N`, unique per context;
+  the reply matched by it in the external outbox, non-matching
+  entries surviving the scan). **Capability-quiet by default
+  [DECIDED, round 50]**: the plain verbs grant nothing — a task
+  touching blobs is refused `Unauthorized` by name; `call_task_with`
+  threads a full `Spawn` (rows, name, init_spec are the caller's
+  knobs), and SUPERVISION IS THE VERB'S, not the spec's: FailFast is
+  forced — a one-call round trip presumes a task that terminates;
+  a long-lived worker is `spawn`, not a call.
 - **The external boundary is a handle, and it closes causal loops
   [round 44]**: `drain_external()` yields stamped envelopes (seq in
   hand); injection (`Context::post`) RETURNS the seq and accepts an

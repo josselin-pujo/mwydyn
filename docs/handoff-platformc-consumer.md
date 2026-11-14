@@ -204,7 +204,8 @@ shaped; nothing above is rewritten. Decisions on record:
   in the same round, so the declared-global surface (which grows
   `decode`/`encode`) is final before platformc's `.d.ts` copy cites
   the ruling. Substance of all three forks uncontested.
-- **Debt 2 → ROUND 50, QUEUED, default stated:** `call_task_with(spec:
+- **Debt 2 → ROUND 50, LANDED** (work-notes/50; spec §3.4 round-50
+  bullet). Original queue note, default as stated: `call_task_with(spec:
   Spawn, letter)` with `call_task` kept and documented as the
   zero-grant convenience (capability-quiet-by-default named in the
   spec); the verb forces `Supervision::FailFast` like `spawn_task` —
@@ -239,3 +240,16 @@ property names were never NUL-terminated — garbage names that
 agreed by rodata luck since round 43; and i64::MIN crossed as a
 float via an abs()-overflow in the ±2^53 boundary check) — both
 would have bitten platformc's ref-typed passes eventually.
+
+---
+
+## Round 50 outcomes (2026-11-14)
+
+Debt 2 landed; all four handoff debts are now closed. Consumer-side
+moves when adopted: `call_task_with(Spawn::new(None,
+factory).rows(vec![...]), letter)` replaces the bridge's
+re-implementation — its hardcoded correlation token dies with the
+copy (the mint was core-side all along). Round 48's `GuestArtifact`
+feeds `load_plugin` (compile + probe once per plugin, clone per
+serve spawn); round 49's `mwydyn.decode`/`encode` replaces the
+pass.js interim codec and the `.d.ts` copy cites spec §9.7.

@@ -458,9 +458,31 @@ other forever; only a SECOND consumer of the names catches it);
 (2) i64::MIN crossed as a FLOAT — `i.abs() <= SAFE` overflows at
 i64::MIN (wraps negative in release, "-2^63 ≤ 2^53" true) → the
 float64 branch; fix = range compare. 48 suites green, clippy clean.
-**Next:** round 50 = tasks meet the ambient surface
-(`call_task_with(spec: Spawn, letter)`, zero-grant call_task kept
-+ named, correlation mint already core-side, FailFast forced); then
-platformc integration closes out (codec adoption deletes pass.js's
-interim), mwydyn-stdlib (the merge actor), epoch/fuel budgets armed
-per exchange.
+**ROUND 50: TASKS MEET THE AMBIENT SURFACE** (work-notes/50;
+spec §3.4 amended; the platformc handoff's LAST debt, ADR-0019
+debt 2): `call_task_with(spec: Spawn, letter)` — the one-call round
+trip over a FULL spec; rows, name, init_spec are the caller's
+knobs; correlation minted CORE-side (call-N, unique per context —
+platformc's hardcoded copy-token dies with its re-implementation);
+non-matching outbox entries survive the scan. `call_task` survives
+as the documented ZERO-GRANT convenience (literally
+call_task_with(Spawn::new(None, factory), req) — behavior
+identical); CAPABILITY-QUIET-BY-DEFAULT now NAMED in §3.4.
+SUPERVISION IS THE VERB'S, NOT THE SPEC'S: FailFast forced — a
+one-call round trip presumes a task that terminates; long-lived
+workers are `spawn`, not a call. Pins (tests/task_surface.rs): the
+zero-grant refusal reported BY NAME in the reply ("Unauthorized" —
+observed, never swallowed); the rows-bearing call green through the
+SAME actor (one source, two verdicts — the capability the only
+delta); mint uniqueness + bystander survival across back-to-back
+calls; FailFast-forced proven behaviorally (Restart spec +
+strike-once-then-answer task = no reply + dead letter; a respected
+Restart would have answered attempt two). The reframe on record:
+never a platformc ask — tasks (r17) and the ambient face (r40) were
+both core law; the verbs just couldn't carry grants between them.
+49 suites green, clippy clean. ALL FOUR handoff debts LANDED
+(48/49/50) — platformc integration is consumer-side from here.
+**Next:** mwydyn-stdlib (the merge actor); epoch/fuel budgets armed
+per exchange; platformc integration closes out consumer-side (codec
+adoption deletes pass.js's interim, call_task_with replaces the
+bridge, GuestArtifact feeds load_plugin).

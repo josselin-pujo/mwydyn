@@ -1569,6 +1569,10 @@ impl Context {
 
     /// The task pattern (§3.4): an unnamed, fail-fast, RAM-tier
     /// actor addressed by its handle — scale-to-zero by lifecycle.
+    /// ZERO-GRANT by default (round 50: the ambient surface is
+    /// granted, never ambient) — a rows-bearing worker rides
+    /// `spawn` with a full `Spawn` spec, or `call_task_with` for
+    /// the one-call pattern.
     pub fn spawn_task(
         &mut self,
         factory: Box<dyn Fn() -> Box<dyn Actor> + Send>,
@@ -1581,19 +1585,39 @@ impl Context {
         )
     }
 
-    /// `call_task` — the embedding's one-call round trip: spawn an
-    /// unnamed task, post the request under a minted correlation, run
-    /// to quiescence, return the reply from the external outbox.
-    /// (Correlations minted here are reply-matching, §2.)
+    /// `call_task` — the embedding's one-call round trip, ZERO-GRANT
+    /// by default (round 50: capability-quiet until the embedder
+    /// grants). Literally `call_task_with(Spawn::new(None,
+    /// factory), request)`.
     pub fn call_task(
         &mut self,
         factory: Box<dyn Fn() -> Box<dyn Actor> + Send>,
+        request: Letter,
+    ) -> Result<Option<Letter>, SpawnError> {
+        self.call_task_with(Spawn::new(None, factory), request)
+    }
+
+    /// `call_task_with` — the one-call round trip over a FULL spec
+    /// (round 50: the task verbs meet the ambient surface — a task
+    /// could never carry capability rows, so every blob-working call
+    /// forced embedders to re-implement this body by hand; the first
+    /// consumer's bridge was the proof). Name, rows, init_spec are
+    /// the caller's knobs. SUPERVISION IS THE VERB'S, NOT THE
+    /// SPEC'S: a one-call round trip presumes a task that terminates
+    /// — FailFast is forced whatever the spec says (a long-lived
+    /// worker is `spawn`, not a call). The correlation is minted
+    /// here (`call-N`, unique per context); the reply is matched by
+    /// it in the external outbox, and NON-MATCHING entries survive
+    /// the scan.
+    pub fn call_task_with(
+        &mut self,
+        spec: Spawn,
         mut request: Letter,
     ) -> Result<Option<Letter>, SpawnError> {
         self.counters += 1;
         let correlation = format!("call-{}", self.counters);
         request.correlation = Some(correlation.clone());
-        let handle = self.spawn_task(factory, &[])?;
+        let handle = self.spawn(spec.supervision(Supervision::FailFast))?;
         let verdict = self.post(&Address::Instance(handle.id.clone()), request, Vec::new(), None);
         if !matches!(verdict, Verdict::Accepted { .. }) {
             return Ok(None);
